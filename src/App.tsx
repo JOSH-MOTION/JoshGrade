@@ -5,6 +5,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { ColorWheel, Histogram, ScopeData, bandColor } from "./Scopes";
+import { Tip } from "./Tip";
 
 type Look = { id: string; name: string; description: string };
 type Adjust = {
@@ -12,11 +13,12 @@ type Adjust = {
   temp: number; tint: number; vibrance: number; saturation: number;
   hue: number[]; sat: number[]; lum: number[];
 };
-type Settings = { look: string; strength: number; adjust: Adjust };
+type Settings = { auto: boolean; look: string; strength: number; adjust: Adjust };
+type ReportLine = { key: string; label: string; before: string; after: string; verdict: string; status: "good" | "warn" | "info" };
 type Photo = { path: string; name: string; thumb?: string; saved?: string; error?: string };
 type Preview = {
   path: string; after: string; overlay?: string | null; width: number; height: number;
-  notes: string[]; auto_sat: number[]; scopes_before: ScopeData; scopes_after: ScopeData;
+  report: ReportLine[]; auto_adjust: Adjust; scopes_before: ScopeData; scopes_after: ScopeData;
 };
 type Progress = { index: number; total: number; file: string; ok: boolean; output?: string; error?: string };
 type Format = "jpeg" | "tiff" | "png";
@@ -30,7 +32,7 @@ const freshAdjust = (): Adjust => ({
   exposure: 0, contrast: 0, highlights: 0, shadows: 0, temp: 0, tint: 0, vibrance: 0, saturation: 0,
   hue: ZERO8(), sat: ZERO8(), lum: ZERO8(),
 });
-const freshSettings = (): Settings => ({ look: "natural", strength: 1, adjust: freshAdjust() });
+const freshSettings = (): Settings => ({ auto: true, look: "natural", strength: 1, adjust: freshAdjust() });
 const clone = (s: Settings): Settings => JSON.parse(JSON.stringify(s));
 
 const EXTENSIONS = [
@@ -44,28 +46,44 @@ const dirName = (p: string) => p.slice(0, Math.max(p.lastIndexOf("/"), p.lastInd
 const stem = (p: string) => baseName(p).replace(/\.[^.]+$/, "");
 const isRaw = (p: string) => /\.(cr2|cr3|crw|nef|nrw|arw|srf|sr2|raf|rw2|rwl|orf|pef|dng|srw|3fr|fff|iiq|mos|erf|kdc|dcr|mrw|x3f)$/i.test(p);
 
-function Slider({ label, value, onChange, min = -100, max = 100, track, suffix = "" }: {
-  label: string; value: number; onChange: (v: number) => void; min?: number; max?: number; track?: string; suffix?: string;
+/** A slider that shows auto + your change. `auto` is what JoshGrade chose; moving the slider
+ *  stores only your change on top, so the auto grade is never lost. */
+function Slider({ label, tip, value, auto = 0, onChange, min = -100, max = 100, track, suffix = "" }: {
+  label: string; tip?: string; value: number; auto?: number; onChange: (offset: number) => void;
+  min?: number; max?: number; track?: string; suffix?: string;
 }) {
-  const id = `s-${label.replace(/\W/g, "")}`;
+  const id = `s-${label.replace(/\W/g, "")}-${tip ?? ""}`;
+  const shown = Math.max(min, Math.min(max, auto + value));
+  const reset = () => onChange(min < 0 ? 0 : 100 - auto);
+  const autoPos = ((Math.max(min, Math.min(max, auto)) - min) / (max - min)) * 100;
+  const fmt = (v: number) => `${v > 0 && min < 0 ? "+" : ""}${Math.round(v)}${suffix}`;
   return (
     <div className="slider">
       <div className="slider-head">
-        <label htmlFor={id} onDoubleClick={() => onChange(min < 0 ? 0 : 100)} title="Double-click to reset">{label}</label>
-        <output className={value !== 0 && min < 0 ? "changed" : ""}>{value > 0 && min < 0 ? "+" : ""}{Math.round(value)}{suffix}</output>
+        <label htmlFor={id} onDoubleClick={reset} title="Double-click to go back to auto">
+          {tip ? <Tip k={tip}>{label}</Tip> : label}
+        </label>
+        <output className={value !== 0 ? "changed" : auto !== 0 ? "auto" : ""}>
+          {fmt(shown)}
+          {auto !== 0 && value === 0 && <span className="auto-tag">auto</span>}
+          {value !== 0 && auto !== 0 && <span className="auto-tag">auto {fmt(auto)}</span>}
+        </output>
       </div>
-      <input
-        id={id}
-        type="range"
-        min={min}
-        max={max}
-        step={1}
-        value={value}
-        onChange={(e) => onChange(+e.target.value)}
-        onDoubleClick={() => onChange(min < 0 ? 0 : 100)}
-        style={track ? ({ "--track": track } as React.CSSProperties) : undefined}
-        className={track ? "tracked" : ""}
-      />
+      <div className="slider-track">
+        <input
+          id={id}
+          type="range"
+          min={min}
+          max={max}
+          step={1}
+          value={shown}
+          onChange={(e) => onChange(+e.target.value - auto)}
+          onDoubleClick={reset}
+          style={track ? ({ "--track": track } as React.CSSProperties) : undefined}
+          className={track ? "tracked" : ""}
+        />
+        {auto !== 0 && <span className="auto-mark" style={{ left: `calc(7px + (100% - 14px) * ${autoPos / 100})` }} title={`Auto: ${fmt(auto)}`} />}
+      </div>
     </div>
   );
 }
@@ -350,7 +368,7 @@ export default function App() {
     if (r) setSplit(Math.max(0, Math.min(100, ((clientX - r.left) / r.width) * 100)));
   };
 
-  const autoSat = showing?.auto_sat?.[band] ?? 1;
+  const auto: Adjust = showing?.auto_adjust ?? freshAdjust();
 
   return (
     <div className={`app ${dragOver ? "drag-over" : ""}`}>
@@ -438,7 +456,7 @@ export default function App() {
                     </div>
                   )}
                   <span className="tag tag-l">Original</span>
-                  {!showBefore && <span className="tag tag-r">{lookName}{adjusted ? " + your edits" : ""}</span>}
+                  {!showBefore && <span className="tag tag-r">{settings.auto ? "Auto + " : ""}{lookName}{adjusted ? " + your edits" : ""}</span>}
                 </div>
               ) : (
                 <div className="developing">
@@ -473,7 +491,7 @@ export default function App() {
         {/* scopes */}
         <div className="group scopes">
           <div className="row">
-            <h2>Check</h2>
+            <h2><Tip k="histogram">Check</Tip></h2>
             <div className="seg mini" role="radiogroup" aria-label="Show measurements for">
               <button role="radio" aria-checked={scopeView === "after"} className={scopeView === "after" ? "on" : ""} onClick={() => setScopeView("after")}>Graded</button>
               <button role="radio" aria-checked={scopeView === "before"} className={scopeView === "before" ? "on" : ""} onClick={() => setScopeView("before")}>Original</button>
@@ -482,6 +500,7 @@ export default function App() {
           {scopes ? (
             <>
               <Histogram data={scopes} clipping={clipping} onToggleClipping={() => setClipping((c) => !c)} />
+              <h2 className="sub wheel-h"><Tip k="wheel">Colour wheel</Tip></h2>
               <div className="wheel-row">
                 <ColorWheel data={scopes} selected={band} onSelect={setBand} />
                 <ul className="band-list">
@@ -529,24 +548,29 @@ export default function App() {
             ))}
           </div>
           <p className="look-desc">{looks.find((l) => l.id === settings.look)?.description}</p>
-          <Slider label="Strength" value={Math.round(settings.strength * 100)} min={0} max={200} suffix="%" onChange={(v) => update((s) => void (s.strength = v / 100))} />
+          <Slider label="Strength" tip="s_strength" value={Math.round(settings.strength * 100)} min={0} max={200} suffix="%" onChange={(v) => update((s) => void (s.strength = v / 100))} />
         </div>
 
         {/* adjustments */}
         <div className="group">
           <div className="row">
             <h2>Light</h2>
-            {adjusted && <button className="link" onClick={resetAdjust}>Reset all edits</button>}
+            <label className="switch">
+              <Tip k="s_auto" align="right"><span>Auto grade</span></Tip>
+              <input type="checkbox" role="switch" checked={settings.auto} onChange={(e) => update((s) => void (s.auto = e.target.checked))} />
+              <span className="switch-ui" aria-hidden />
+            </label>
           </div>
-          <Slider label="Exposure" value={a.exposure} onChange={setAdj("exposure")} />
-          <Slider label="Contrast" value={a.contrast} onChange={setAdj("contrast")} />
-          <Slider label="Highlights" value={a.highlights} onChange={setAdj("highlights")} />
-          <Slider label="Shadows" value={a.shadows} onChange={setAdj("shadows")} />
+          <Slider label="Exposure" tip="s_exposure" value={a.exposure} auto={auto.exposure} onChange={setAdj("exposure")} />
+          <Slider label="Contrast" tip="s_contrast" value={a.contrast} auto={auto.contrast} onChange={setAdj("contrast")} />
+          <Slider label="Highlights" tip="s_highlights" value={a.highlights} auto={auto.highlights} onChange={setAdj("highlights")} />
+          <Slider label="Shadows" tip="s_shadows" value={a.shadows} auto={auto.shadows} onChange={setAdj("shadows")} />
           <h2 className="sub">Colour</h2>
-          <Slider label="Temperature" value={a.temp} onChange={setAdj("temp")} track="linear-gradient(90deg,#4a7fd6,#9a9a9a,#e0b040)" />
-          <Slider label="Tint" value={a.tint} onChange={setAdj("tint")} track="linear-gradient(90deg,#4fb35a,#9a9a9a,#c450b8)" />
-          <Slider label="Vibrance" value={a.vibrance} onChange={setAdj("vibrance")} />
-          <Slider label="Saturation" value={a.saturation} onChange={setAdj("saturation")} />
+          <Slider label="Temperature" tip="s_temp" value={a.temp} auto={auto.temp} onChange={setAdj("temp")} track="linear-gradient(90deg,#4a7fd6,#9a9a9a,#e0b040)" />
+          <Slider label="Tint" tip="s_tint" value={a.tint} auto={auto.tint} onChange={setAdj("tint")} track="linear-gradient(90deg,#4fb35a,#9a9a9a,#c450b8)" />
+          <Slider label="Vibrance" tip="s_vibrance" value={a.vibrance} auto={auto.vibrance} onChange={setAdj("vibrance")} />
+          <Slider label="Saturation" tip="s_saturation" value={a.saturation} onChange={setAdj("saturation")} />
+          {adjusted && <button className="link reset-link" onClick={resetAdjust}>Back to auto (undo my changes)</button>}
         </div>
 
         <div className="group">
@@ -567,19 +591,30 @@ export default function App() {
           </div>
           <p className="band-title">
             {BANDS[band].name}
-            {autoSat < 0.99 && <span className="auto-note">Auto toned down {Math.round((1 - autoSat) * 100)}%</span>}
+            {auto.sat[band] < 0 && <span className="auto-note">Auto toned down {Math.round(-auto.sat[band])}% (was losing detail)</span>}
           </p>
-          <Slider label="Hue" value={a.hue[band]} onChange={setBandAdj("hue")} track={`linear-gradient(90deg,hsl(${BANDS[band].hue - 30},80%,50%),hsl(${BANDS[band].hue},80%,50%),hsl(${BANDS[band].hue + 30},80%,50%))`} />
-          <Slider label="Saturation" value={a.sat[band]} onChange={setBandAdj("sat")} track={`linear-gradient(90deg,#8a8a8a,${bandColor(BANDS[band].hue)})`} />
-          <Slider label="Luminance" value={a.lum[band]} onChange={setBandAdj("lum")} track={`linear-gradient(90deg,hsl(${BANDS[band].hue},70%,18%),hsl(${BANDS[band].hue},70%,78%))`} />
+          <Slider label="Hue" tip="b_hue" value={a.hue[band]} onChange={setBandAdj("hue")} track={`linear-gradient(90deg,hsl(${BANDS[band].hue - 30},80%,50%),hsl(${BANDS[band].hue},80%,50%),hsl(${BANDS[band].hue + 30},80%,50%))`} />
+          <Slider label="Saturation" tip="b_sat" value={a.sat[band]} auto={auto.sat[band]} onChange={setBandAdj("sat")} track={`linear-gradient(90deg,#8a8a8a,${bandColor(BANDS[band].hue)})`} />
+          <Slider label="Luminance" tip="b_lum" value={a.lum[band]} auto={auto.lum[band]} onChange={setBandAdj("lum")} track={`linear-gradient(90deg,hsl(${BANDS[band].hue},70%,18%),hsl(${BANDS[band].hue},70%,78%))`} />
         </div>
 
         {showing && (
-          <div className="group fixes">
-            <h2>What JoshGrade fixed</h2>
-            <ul>
-              {showing.notes.map((n) => (
-                <li key={n} className={n.startsWith("Note:") ? "warn" : ""}>{n.replace(/^Note: /, "")}</li>
+          <div className="group report">
+            <h2>Report: original → now</h2>
+            <p className="report-hint">Measured from your photo with the current settings. It updates every time you change something.</p>
+            <ul className="report-list">
+              {showing.report.map((l) => (
+                <li key={l.key} className={l.status}>
+                  <div className="r-top">
+                    <Tip k={l.key}>{l.label}</Tip>
+                    <span className="r-vals">
+                      <span className="before">{l.before}</span>
+                      <span className="arrow" aria-label="now">→</span>
+                      <span className="after">{l.after}</span>
+                    </span>
+                  </div>
+                  <div className="r-verdict"><span className={`dot-status ${l.status}`} aria-hidden />{l.verdict}</div>
+                </li>
               ))}
             </ul>
           </div>

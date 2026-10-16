@@ -49,6 +49,12 @@ const BASE: LookParams = LookParams {
 pub fn all_looks() -> Vec<Look> {
     vec![
         Look {
+            id: "normal",
+            name: "Normal",
+            description: "Only JoshGrade's automatic correction: right exposure, true whites, balanced colour. No styling added.",
+            params: BASE,
+        },
+        Look {
             id: "natural",
             name: "Natural",
             description: "Accurate correction with a gentle professional finish: true whites, balanced exposure, a touch of contrast and colour.",

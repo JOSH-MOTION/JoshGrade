@@ -23,7 +23,7 @@ The app lists exactly what it changed for each photo, under **What JoshGrade fix
 
 ## Looks
 
-On top of the correction, pick a look: **Natural**, **Vivid**, **Warm**, **Cinematic**, **Moody**, **Bright & Airy**, **Film**, **Black & White**. Strength goes from 0% (original) to 200%. Double-click any slider to reset it.
+On top of the correction, pick a look: **Normal** (only the automatic correction, no styling), **Natural**, **Vivid**, **Warm**, **Cinematic**, **Moody**, **Bright & Airy**, **Film**, **Black & White**. Strength goes from 0% (original) to 200%. Double-click any slider to reset it.
 
 ## Checking a photo is correct
 
@@ -34,10 +34,15 @@ The **Check** panel measures the photo, so you can see whether it's right instea
 - **Show clipping** (or press **J**): paints blown highlights red and crushed shadows blue on the photo.
 - **Colour wheel**: every colour in the photo plotted around a circle. Angle is the colour, distance from the centre is how intense it is. Each of the 8 colour bands has a spoke. A colour that's so strong it's losing detail turns its spoke **red** and gets a **!**. JoshGrade tones those colours down automatically, and the wheel shows how much.
 - Switch between **Graded** and **Original** to compare the measurements.
+- Hover over **Shadows**, **Midtones**, **Highlights** (or anywhere on the histogram), any slider name or any report line for a plain-language explanation.
+
+The **Report** at the bottom measures the original and the current grade the same way (exposure, blown highlights, crushed shadows, colour cast, contrast, colour intensity, colours losing detail, skin) and updates live as you change things.
 
 ## Fine-tuning
 
-Everything JoshGrade does automatically can be adjusted:
+With **Auto grade** on, JoshGrade sets the sliders for you: the number shows what it chose (marked *auto*, with a small blue tick under the slider). Move a slider to adjust from there; double-click to go back to the auto value. Turn **Auto grade** off to see the photo without the automatic correction.
+
+Everything can be adjusted:
 
 - **Light**: Exposure, Contrast, Highlights, Shadows
 - **Colour**: Temperature, Tint, Vibrance, Saturation

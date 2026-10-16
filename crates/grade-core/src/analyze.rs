@@ -209,7 +209,8 @@ pub fn analyze(photo: &Photo) -> Analysis {
         ev = ev.min((ev_hl + 0.25).max(0.0));
     }
     // Likewise don't darken a high-key scene whose shadows are already dark.
-    if ev < 0.0 {
+    // (Unless a lot of the photo is blown out – then it really is overexposed.)
+    if ev < 0.0 && clipped < 0.05 {
         let p10 = h.pct(0.10).max(0.005);
         let ev_sh = (to_linear(0.06) / to_linear(p10)).log2();
         ev = ev.max((ev_sh - 0.25).min(0.0));
@@ -312,7 +313,14 @@ pub fn analyze(photo: &Photo) -> Analysis {
 
     // Colour – Rule: lift muted colour, calm garish colour, never push skin.
     let mean_sat = if sat_n > 0.0 { sat_sum / sat_n } else { 0.0 };
-    let vibrance = ((0.27 - mean_sat) * 1.5).clamp(-0.3, 0.35);
+    // Only lift genuinely dull photos and calm genuinely garish ones; normal colour is left alone.
+    let vibrance = if mean_sat < 0.24 {
+        ((0.24 - mean_sat) * 1.8).min(0.35)
+    } else if mean_sat > 0.62 {
+        -((mean_sat - 0.62) * 1.2).min(0.3)
+    } else {
+        0.0
+    };
     let vibrance = if vibrance.abs() < 0.03 { 0.0 } else { vibrance };
     if vibrance > 0.03 {
         notes.push("Boosted dull colours".into());

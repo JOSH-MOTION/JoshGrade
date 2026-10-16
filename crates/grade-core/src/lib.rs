@@ -13,9 +13,10 @@ pub mod encode;
 pub mod grade;
 pub mod looks;
 pub mod lut;
+pub mod report;
 pub mod scopes;
 
-pub use adjust::{Adjust, Settings};
+pub use adjust::{auto_sliders, Adjust, Settings};
 pub use analyze::{analyze, Analysis, AutoParams};
 pub use encode::OutputFormat;
 pub use grade::Grade;
@@ -61,7 +62,8 @@ pub struct SaveResult {
 /// Build the grade for a photo from its analysis and settings.
 pub fn grade_with(analysis: &Analysis, settings: &Settings) -> Result<Grade, Error> {
     let look = find_look(&settings.look).ok_or_else(|| Error::UnknownLook(settings.look.clone()))?;
-    Ok(Grade::with_adjust(&analysis.params, &look.params, &settings.adjust, settings.strength))
+    let auto = if settings.auto { analysis.params } else { AutoParams::identity() };
+    Ok(Grade::with_adjust(&auto, &look.params, &settings.adjust, settings.strength))
 }
 
 /// Analyse a photo (from a reduced copy) and build its grade.

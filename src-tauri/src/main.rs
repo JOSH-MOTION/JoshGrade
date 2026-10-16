@@ -3,7 +3,8 @@
 
 use base64::Engine;
 use grade_core::scopes::{self, Scopes};
-use grade_core::{decode, encode, lut, Analysis, Grade, OutputFormat, Photo, Settings};
+use grade_core::report::{self, Line, Measure};
+use grade_core::{decode, encode, lut, Adjust, Analysis, Grade, OutputFormat, Photo, Settings};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -16,6 +17,7 @@ struct Entry {
     analysis: Analysis,
     before_url: String,
     before_scopes: Scopes,
+    before_measure: Measure,
 }
 
 #[derive(Default)]
@@ -46,8 +48,10 @@ struct PreviewResult {
     overlay: Option<String>,
     width: u32,
     height: u32,
-    notes: Vec<String>,
-    auto_sat: [f32; 8],
+    /// Measured before → after report for the current settings.
+    report: Vec<Line>,
+    /// The automatic correction in slider units (what the sliders start at).
+    auto_adjust: Adjust,
     scopes_before: Scopes,
     scopes_after: Scopes,
 }
@@ -95,7 +99,8 @@ fn cached(state: &AppState, path: &str) -> Result<Arc<Entry>, String> {
     let analysis = grade_core::analyze(&photo);
     let before_url = jpeg_url(&photo, 88)?;
     let before_scopes = scopes::compute(&photo);
-    let entry = Arc::new(Entry { photo, analysis, before_url, before_scopes });
+    let before_measure = report::measure(&photo);
+    let entry = Arc::new(Entry { photo, analysis, before_url, before_scopes, before_measure });
     let mut c = state.cache.lock().unwrap();
     if c.len() > 16 {
         c.clear(); // keep memory bounded
@@ -151,8 +156,8 @@ async fn preview(state: St<'_>, path: String, settings: Settings, with_before: b
             overlay,
             width: e.photo.width,
             height: e.photo.height,
-            notes: e.analysis.notes.clone(),
-            auto_sat: e.analysis.params.hsl_sat,
+            report: report::compare(&e.before_measure, &report::measure(&after)),
+            auto_adjust: if settings.auto { grade_core::auto_sliders(&e.analysis.params) } else { Adjust::default() },
             scopes_before: e.before_scopes.clone(),
             scopes_after: scopes::compute(&after),
         })
@@ -176,7 +181,8 @@ async fn look_thumbs(state: St<'_>, path: String, settings: Settings) -> Result<
         grade_core::all_looks()
             .into_iter()
             .map(|l| {
-                let g = Grade::with_adjust(&e.analysis.params, &l.params, &settings.adjust, settings.strength);
+                let auto = if settings.auto { e.analysis.params } else { grade_core::AutoParams::identity() };
+                let g = Grade::with_adjust(&auto, &l.params, &settings.adjust, settings.strength);
                 Ok(LookThumb { id: l.id.into(), image: jpeg_url(&g.apply(&small), 80)? })
             })
             .collect()

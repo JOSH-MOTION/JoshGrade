@@ -24,6 +24,8 @@ pub struct Adjust {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Settings {
+    /// Apply JoshGrade's automatic correction (exposure, white balance, contrast, colour).
+    pub auto: bool,
     pub look: String,
     /// 0..2 (1 = the look as designed).
     pub strength: f32,
@@ -32,7 +34,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { look: "natural".into(), strength: 1.0, adjust: Adjust::default() }
+        Settings { auto: true, look: "natural".into(), strength: 1.0, adjust: Adjust::default() }
     }
 }
 
@@ -49,4 +51,29 @@ impl Adjust {
     pub fn band_hue_deg(&self, i: usize) -> f32 { self.hue[i] * 0.3 } // ±30°
     pub fn band_sat(&self, i: usize) -> f32 { self.sat[i] / 100.0 } // ×(1 ± 1)
     pub fn band_lum(&self, i: usize) -> f32 { self.lum[i] / 400.0 } // ±0.25
+}
+
+/// The automatic correction expressed in slider units, so the app can show what JoshGrade
+/// chose (e.g. Exposure −35 = it pulled exposure down 0.7 stops). Your edits are added on top.
+pub fn auto_sliders(p: &crate::AutoParams) -> Adjust {
+    // White balance gains -> temperature / tint (exact inverse of how Grade applies them).
+    let rg = p.wb_gains[0] / p.wb_gains[1];
+    let bg = p.wb_gains[2] / p.wb_gains[1];
+    let k = 2.0 / (rg + bg);
+    let tint = 1.0 - k;
+    let temp = rg * k - 1.0;
+    let r = |v: f32| (v * 10.0).round() / 10.0;
+    Adjust {
+        exposure: r(p.exposure_ev * 50.0),
+        contrast: r(p.contrast * 250.0),
+        highlights: r(-((0.88 - p.highlight_knee).max(0.0) / 0.2 * 50.0)),
+        shadows: r(p.shadows * 250.0),
+        temp: r(temp * 330.0),
+        tint: r(tint * 250.0),
+        vibrance: r(p.vibrance * 160.0),
+        saturation: 0.0,
+        hue: [0.0; 8],
+        sat: p.hsl_sat.map(|v| r((v - 1.0) * 100.0)),
+        lum: p.hsl_lum.map(|v| r(v * 400.0)),
+    }
 }

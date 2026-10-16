@@ -1,4 +1,5 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+import { TIPS, Tip } from "./Tip";
 
 export type Band = { name: string; hue: number; share: number; strength: number; saturated: number; clipped: number; over: boolean };
 export type ScopeData = {
@@ -52,9 +53,11 @@ export function Histogram({ data, clipping, onToggleClipping }: { data: ScopeDat
         ctx.fillStyle = color;
         ctx.fill();
       };
-      // midtone guides
-      ctx.strokeStyle = "rgba(255,255,255,0.07)";
-      for (const g of [0.25, 0.5, 0.75]) {
+      // zone dividers (shadows | midtones | highlights) and the ideal midtone band
+      ctx.fillStyle = "rgba(143,199,154,0.09)";
+      ctx.fillRect(0.36 * w, 0, 0.24 * w, h);
+      ctx.strokeStyle = "rgba(255,255,255,0.08)";
+      for (const g of [1 / 3, 2 / 3]) {
         ctx.beginPath();
         ctx.moveTo(g * w, 0);
         ctx.lineTo(g * w, h);
@@ -70,29 +73,65 @@ export function Histogram({ data, clipping, onToggleClipping }: { data: ScopeDat
       ctx.strokeStyle = "rgba(255,255,255,0.85)";
       ctx.lineWidth = 1.2;
       ctx.stroke();
+      // this photo's midtones
+      const mx = data.median * w;
+      ctx.setLineDash([3, 3]);
+      ctx.strokeStyle = "#fff";
+      ctx.beginPath();
+      ctx.moveTo(mx, 0);
+      ctx.lineTo(mx, h);
+      ctx.stroke();
+      ctx.setLineDash([]);
     },
     [data],
   );
 
+  // Hover: explain the zone under the pointer and how much of the photo is in it.
+  const [hover, setHover] = useState<{ zone: "shadows" | "midtones" | "highlights"; x: number } | null>(null);
+  const zoneShare = (zone: string) => {
+    const n = data.hist_l.length;
+    const total = data.hist_l.reduce((a, b) => a + b, 0) || 1;
+    const [a, b] = zone === "shadows" ? [0, n / 3] : zone === "midtones" ? [n / 3, (2 * n) / 3] : [(2 * n) / 3, n];
+    return (data.hist_l.slice(Math.floor(a), Math.floor(b)).reduce((x, y) => x + y, 0) / total) * 100;
+  };
+  const mid = data.median * 100;
+  const midWord = mid < 25 ? "too dark" : mid < 36 ? "a little dark" : mid <= 60 ? "balanced" : mid <= 70 ? "a little bright" : "too bright";
+  const verdict =
+    mid < 25 ? { cls: "under", text: "Too dark" } : mid < 36 ? { cls: "under soft", text: "A little dark" }
+    : mid <= 60 ? { cls: "good", text: "Exposure looks right" } : mid <= 70 ? { cls: "over soft", text: "A little bright" } : { cls: "over", text: "Too bright" };
+
   const hi = data.clip_high >= 0.3;
   const lo = data.clip_low >= 0.3;
-  const verdict =
-    data.exposure === "under" ? { cls: "under", text: "Underexposed" } : data.exposure === "over" ? { cls: "over", text: "Overexposed" } : { cls: "good", text: "Exposure looks right" };
-
   return (
     <div className="histo">
-      <div className="histo-frame">
+      <div
+        className="histo-frame"
+        onMouseMove={(e) => {
+          const r = e.currentTarget.getBoundingClientRect();
+          const f = (e.clientX - r.left) / r.width;
+          setHover({ zone: f < 1 / 3 ? "shadows" : f < 2 / 3 ? "midtones" : "highlights", x: e.clientX - r.left });
+        }}
+        onMouseLeave={() => setHover(null)}
+      >
         <canvas ref={ref} className="histo-canvas" aria-label="Histogram" />
+        <span className="mid-label" style={{ left: `${Math.min(80, Math.max(2, mid))}%` }}>Midtones {mid.toFixed(0)}%</span>
+        {hover && (
+          <div className={`histo-tip ${hover.x > 200 ? "right" : ""}`} role="tooltip">
+            <strong>{hover.zone[0].toUpperCase() + hover.zone.slice(1)}</strong> · {zoneShare(hover.zone).toFixed(0)}% of this photo
+            <p>{TIPS[hover.zone]}</p>
+            {hover.zone === "midtones" && <p className="mid-now">This photo's midtones are at {mid.toFixed(0)}%: {midWord}. Balanced is about 36–60%.</p>}
+          </div>
+        )}
         <button className={`clip-tri left ${lo ? "lit" : ""}`} onClick={onToggleClipping} title={`Shadows crushed to black: ${data.clip_low.toFixed(1)}%. Click to show on the photo.`} aria-label="Show crushed shadows" />
         <button className={`clip-tri right ${hi ? "lit" : ""}`} onClick={onToggleClipping} title={`Highlights blown to white: ${data.clip_high.toFixed(1)}%. Click to show on the photo.`} aria-label="Show blown highlights" />
       </div>
       <div className="histo-scale">
-        <span>Shadows</span>
-        <span>Midtones</span>
-        <span>Highlights</span>
+        <Tip k="shadows">Shadows</Tip>
+        <Tip k="midtones">Midtones</Tip>
+        <Tip k="highlights" align="right">Highlights</Tip>
       </div>
       <div className="histo-status">
-        <span className={`verdict ${verdict.cls}`}>{verdict.text}</span>
+        <Tip k="exposure"><span className={`verdict ${verdict.cls}`}>{verdict.text}</span></Tip>
         {hi && <span className="chip over">{data.clip_high.toFixed(1)}% blown out</span>}
         {lo && <span className="chip under">{data.clip_low.toFixed(1)}% crushed</span>}
         <button className={`chip toggle ${clipping ? "on" : ""}`} onClick={onToggleClipping} aria-pressed={clipping}>
