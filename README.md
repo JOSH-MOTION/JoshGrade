@@ -2,7 +2,7 @@
 
 Offline automatic photo correction and colour grading for Mac.
 
-Drop in photos (JPEG, PNG, TIFF, WebP or camera RAW). JoshGrade measures each one, fixes what's wrong, applies a look, and saves the result. Nothing is uploaded; everything runs on your laptop.
+Drop in photos (JPEG, PNG, TIFF, WebP, HEIC or camera RAW, including Canon CR3). JoshGrade measures each one, fixes what's wrong, applies a look, and saves the result. Nothing is uploaded; everything runs on your laptop.
 
 ## What it fixes on its own
 
@@ -23,7 +23,31 @@ The app lists exactly what it changed for each photo, under **What JoshGrade fix
 
 ## Looks
 
-On top of the correction, pick a look: **Natural**, **Warm**, **Cinematic**, **Moody**, **Bright & Airy**, **Film**, **Black & White**. The strength slider goes from 0% (original) to 150%. Double-click it to reset to 100%.
+On top of the correction, pick a look: **Natural**, **Vivid**, **Warm**, **Cinematic**, **Moody**, **Bright & Airy**, **Film**, **Black & White**. Strength goes from 0% (original) to 200%. Double-click any slider to reset it.
+
+## Checking a photo is correct
+
+The **Check** panel measures the photo, so you can see whether it's right instead of guessing:
+
+- **Histogram**: red, green, blue and brightness from shadows (left) to highlights (right). The corner triangles light up when shadows are crushed to black (blue) or highlights are blown to white (red).
+- **Exposure verdict**: *Underexposed*, *Exposure looks right* or *Overexposed*, judged from the midtones.
+- **Show clipping** (or press **J**): paints blown highlights red and crushed shadows blue on the photo.
+- **Colour wheel**: every colour in the photo plotted around a circle. Angle is the colour, distance from the centre is how intense it is. Each of the 8 colour bands has a spoke. A colour that's so strong it's losing detail turns its spoke **red** and gets a **!**. JoshGrade tones those colours down automatically, and the wheel shows how much.
+- Switch between **Graded** and **Original** to compare the measurements.
+
+## Fine-tuning
+
+Everything JoshGrade does automatically can be adjusted:
+
+- **Light**: Exposure, Contrast, Highlights, Shadows
+- **Colour**: Temperature, Tint, Vibrance, Saturation
+- **Colour mix**: Hue, Saturation and Luminance for Red, Orange, Yellow, Green, Aqua, Blue, Purple and Magenta. Click a colour on the wheel to jump to it.
+
+Each photo keeps its own settings. **Use these settings for all photos** copies the current ones to every photo, and each photo still gets its own automatic correction.
+
+## Saving
+
+Nothing is saved until you click **Save this photo…** (you pick the name and folder) or **Save all photos…** (you pick a folder). Originals are never changed, and existing files are never overwritten.
 
 ## Using it with Photoshop
 
@@ -86,7 +110,7 @@ Options: `--look ID`, `--strength 0..1.5`, `--out DIR`, `--format jpeg|tiff|png`
 
 - **JPEG** (quality 95). When the original is a JPEG, the camera data (EXIF: date, camera, lens, orientation) and colour profile are copied across.
 - **TIFF 16-bit** / **PNG 16-bit** for further editing without banding. Recommended for RAW files.
-- Files are saved as `name_graded.jpg` in a `Graded` folder next to the originals (or a folder you choose). Originals are never touched.
+- Single photos are saved where you choose. "Save all" names files `name_graded.jpg` in the folder you pick. Originals are never touched.
 
 ## How it's built
 
@@ -110,7 +134,7 @@ Because every correction is a single per-pixel transform, the on-screen preview,
 
 - Blown-out areas (pure white in the original) can't be recovered; the app tells you when a photo has a lot of them.
 - Corrections are global (whole-photo). It doesn't do local edits like brushing a face brighter.
-- HEIC (iPhone) files aren't supported yet. Export them as JPEG first.
+- HEIC (iPhone) files open on Mac only (through macOS's built-in converter).
 - RAW support comes from `rawler` (LGPL-2.1). A few very new camera models may not be supported yet.
 
 ## Next step: the trained grade

@@ -127,3 +127,53 @@ pub fn tint_vector(hue_deg: f32) -> Rgb {
     let y = luma(c);
     [c[0] - y, c[1] - y, c[2] - y]
 }
+
+/// RGB (0..1) -> HSV with hue in degrees 0..360.
+#[inline]
+pub fn rgb_to_hsv(c: Rgb) -> [f32; 3] {
+    let v = max3(c);
+    [hue(c), saturation(c), v]
+}
+
+/// HSV (hue degrees) -> RGB.
+#[inline]
+pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Rgb {
+    let h = h.rem_euclid(360.0) / 60.0;
+    let i = h.floor();
+    let f = h - i;
+    let p = v * (1.0 - s);
+    let q = v * (1.0 - s * f);
+    let t = v * (1.0 - s * (1.0 - f));
+    match i as i32 {
+        0 => [v, t, p],
+        1 => [q, v, p],
+        2 => [p, v, t],
+        3 => [p, q, v],
+        4 => [t, p, v],
+        _ => [v, p, q],
+    }
+}
+
+/// The eight colour bands used for the colour mixer and the colour wheel,
+/// with their centre hues in degrees (same split as Lightroom's HSL panel).
+pub const BAND_NAMES: [&str; 8] = ["Red", "Orange", "Yellow", "Green", "Aqua", "Blue", "Purple", "Magenta"];
+pub const BAND_HUES: [f32; 8] = [0.0, 30.0, 60.0, 120.0, 180.0, 220.0, 270.0, 320.0];
+
+/// How much a hue belongs to each band. Weights always sum to 1 and blend smoothly
+/// between neighbouring bands, so adjustments never create hard edges.
+#[inline]
+pub fn band_weights(h: f32) -> [f32; 8] {
+    let h = h.rem_euclid(360.0);
+    let mut w = [0.0f32; 8];
+    for i in 0..8 {
+        let a = BAND_HUES[i];
+        let b = if i == 7 { 360.0 } else { BAND_HUES[i + 1] };
+        if h >= a && h < b {
+            let t = (h - a) / (b - a);
+            w[i] = 1.0 - t;
+            w[(i + 1) % 8] = t;
+            break;
+        }
+    }
+    w
+}

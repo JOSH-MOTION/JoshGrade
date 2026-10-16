@@ -29,13 +29,17 @@ pub struct AutoParams {
     pub highlight_knee: f32,
     /// Vibrance change.
     pub vibrance: f32,
+    /// Per colour band (Red..Magenta): saturation multiplier (1 = unchanged)
+    /// and brightness change, used to calm colours that are too strong.
+    pub hsl_sat: [f32; 8],
+    pub hsl_lum: [f32; 8],
 }
 
 impl AutoParams {
     pub fn identity() -> Self {
         AutoParams {
             wb_gains: [1.0; 3], exposure_ev: 0.0, black: 0.0, white: 1.0, shadows: 0.0,
-            contrast: 0.0, highlight_knee: 0.92, vibrance: 0.0,
+            contrast: 0.0, highlight_knee: 0.92, vibrance: 0.0, hsl_sat: [1.0; 8], hsl_lum: [0.0; 8],
         }
     }
 }
@@ -197,7 +201,7 @@ pub fn analyze(photo: &Photo) -> Analysis {
     let median = h.pct(0.5).max(0.01);
     let p95 = h.pct(0.95).max(0.01);
     let target = 0.43;
-    let mut ev = (to_linear(target) / to_linear(median)).log2() * 0.75;
+    let mut ev = (to_linear(target) / to_linear(median)).log2() * 0.85;
     // Rule: don't brighten a photo whose bright parts are already bright – it's a
     // low-key / dark-background scene (stage, night, sports crowd), not underexposed.
     if ev > 0.0 {
@@ -324,14 +328,75 @@ pub fn analyze(photo: &Photo) -> Analysis {
             clipped * 100.0
         ));
     }
+    let mut params = AutoParams {
+        wb_gains: gains, exposure_ev: ev, black, white, shadows, contrast, highlight_knee, vibrance,
+        hsl_sat: [1.0; 8], hsl_lum: [0.0; 8],
+    };
+
+    // ---------------------------------------------------------------- per-colour balance
+    // Rule: no single colour should be so intense it looks artificial or loses detail.
+    // Measure each colour band *after* the corrections above, and calm the ones that are
+    // over the limit (e.g. a red dress that glows, an orange face, a neon-green lawn).
+    {
+        let natural = crate::looks::LookParams { roll: 1.0, ..Default::default() };
+        let g = crate::grade::Grade::new(&params, &natural, 1.0);
+        let corrected: Vec<Rgb> = px.iter().map(|p| g.apply_px(*p)).collect();
+        let bands = crate::scopes::band_stats(&corrected);
+        let mut fixed = Vec::new();
+        for (i, b) in bands.iter().enumerate() {
+            if b.share < 0.03 {
+                continue;
+            }
+            let mut f = 1.0f32;
+            if b.saturated > crate::scopes::SATURATED_LIMIT {
+                // Pull back until the clipped part regains texture.
+                f = (1.0 - (b.saturated - crate::scopes::SATURATED_LIMIT) / 100.0 * 1.3).clamp(0.7, 0.97);
+            }
+            if b.clipped > 15.0 {
+                f *= 0.95;
+                params.hsl_lum[i] = -((b.clipped - 15.0) / 200.0).clamp(0.0, 0.08) - 0.02;
+            }
+            if f < 0.99 || params.hsl_lum[i] < 0.0 {
+                params.hsl_sat[i] = f;
+                fixed.push((b.name, ((1.0 - f) * 100.0).round()));
+            }
+        }
+
+        // Rule: skin should never look sunburnt or orange.
+        let (mut skin_s, mut skin_w) = (0f32, 0f32);
+        for c in &corrected {
+            let w = skin_weight(*c);
+            if w > 0.3 {
+                skin_s += saturation(*c) * w;
+                skin_w += w;
+            }
+        }
+        let skin_frac = skin_w / corrected.len().max(1) as f32;
+        if skin_frac > 0.02 {
+            let mean = skin_s / skin_w;
+            if mean > 0.585 {
+                let f = (0.56 / mean).clamp(0.78, 1.0);
+                params.hsl_sat[0] = params.hsl_sat[0].min(1.0 - (1.0 - f) * 0.6);
+                params.hsl_sat[1] = params.hsl_sat[1].min(f);
+                notes.push(format!("Skin looked too red / orange – softened it {:.0}%", (1.0 - f) * 100.0));
+            }
+        }
+
+        for (name, pct) in fixed {
+            if pct >= 1.0 {
+                notes.push(format!("{name}s were so strong they lost detail – toned them down {pct:.0}%"));
+            } else {
+                notes.push(format!("{name}s were clipping – recovered detail"));
+            }
+        }
+    }
+
     if notes.is_empty() {
         notes.push("Photo was already well balanced – only gentle refinements".into());
     }
 
     Analysis {
-        params: AutoParams {
-            wb_gains: gains, exposure_ev: ev, black, white, shadows, contrast, highlight_knee, vibrance,
-        },
+        params,
         notes,
         stats: Stats {
             median_brightness: median,

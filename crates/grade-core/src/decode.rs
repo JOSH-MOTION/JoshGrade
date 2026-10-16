@@ -14,6 +14,8 @@ pub const RAW_EXTENSIONS: &[&str] = &[
     "dng", "srw", "3fr", "fff", "iiq", "mos", "erf", "kdc", "dcr", "mrw", "x3f",
 ];
 pub const RASTER_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "tif", "tiff", "webp"];
+/// iPhone / modern camera formats. Read through macOS's built-in converter (`sips`).
+pub const HEIF_EXTENSIONS: &[&str] = &["heic", "heif", "hif"];
 
 fn ext_of(path: &Path) -> String {
     path.extension()
@@ -30,9 +32,15 @@ pub fn is_jpeg(path: &Path) -> bool {
     matches!(ext_of(path).as_str(), "jpg" | "jpeg")
 }
 
+pub fn is_heif(path: &Path) -> bool {
+    HEIF_EXTENSIONS.contains(&ext_of(path).as_str())
+}
+
 pub fn is_supported(path: &Path) -> bool {
     let e = ext_of(path);
-    RAW_EXTENSIONS.contains(&e.as_str()) || RASTER_EXTENSIONS.contains(&e.as_str())
+    RAW_EXTENSIONS.contains(&e.as_str())
+        || RASTER_EXTENSIONS.contains(&e.as_str())
+        || (cfg!(target_os = "macos") && HEIF_EXTENSIONS.contains(&e.as_str()))
 }
 
 /// Load a photo.
@@ -51,6 +59,8 @@ pub fn load(path: &Path, max_dim: Option<u32>, apply_orientation: bool) -> Resul
 pub fn load_dynamic(path: &Path) -> Result<(DynamicImage, Orientation), Error> {
     if is_raw(path) {
         load_raw(path)
+    } else if is_heif(path) {
+        load_heif(path)
     } else {
         load_raster(path)
     }
@@ -108,6 +118,31 @@ fn raw_embedded_preview(path: &Path) -> Option<DynamicImage> {
     let mut img = img;
     img.apply_orientation(orientation);
     Some(img)
+}
+
+/// HEIC/HEIF: let macOS convert it to a 16-bit TIFF in a temp file, then read that.
+fn load_heif(path: &Path) -> Result<(DynamicImage, Orientation), Error> {
+    let tmp = std::env::temp_dir().join(format!(
+        "joshgrade-{}-{}.tiff",
+        std::process::id(),
+        path.file_stem().and_then(|s| s.to_str()).unwrap_or("photo")
+    ));
+    let status = std::process::Command::new("/usr/bin/sips")
+        .args(["-s", "format", "tiff", "-s", "formatOptions", "lzw"])
+        .arg(path)
+        .arg("--out")
+        .arg(&tmp)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|e| Error::Other(format!("couldn't convert HEIC: {e}")))?;
+    if !status.success() {
+        return Err(Error::Other("couldn't convert this HEIC file".into()));
+    }
+    let res = load_raster(&tmp);
+    let _ = std::fs::remove_file(&tmp);
+    // sips already applies the rotation.
+    res.map(|(img, _)| (img, Orientation::NoTransforms))
 }
 
 fn load_raster(path: &Path) -> Result<(DynamicImage, Orientation), Error> {
