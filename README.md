@@ -38,6 +38,16 @@ Tick **Also save a LUT for each photo** to get one `.cube` next to every graded 
 
 ## Install
 
+**Easiest (builds it on your Mac):** open Terminal, paste this line and press Return:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/JOSH-MOTION/JoshGrade/main/install-mac.sh | bash
+```
+
+It installs what's needed (Apple developer tools, Rust, Node.js), builds JoshGrade and puts it in Applications. Run the same line again any time to update.
+
+**Download instead:** once GitHub Actions is enabled on this account, every update also builds a ready-made .dmg:
+
 1. Go to the [Releases page](https://github.com/JOSH-MOTION/JoshGrade/releases/latest) and download **JoshGrade_…_universal.dmg**. It runs on Apple Silicon and Intel Macs.
 2. Open the .dmg and drag **JoshGrade** into **Applications**.
 3. First launch only: macOS says it can't verify the developer, because the app isn't registered with Apple. Open **System Settings › Privacy & Security**, scroll down and click **Open Anyway**.
