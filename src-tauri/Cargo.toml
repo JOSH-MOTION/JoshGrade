@@ -1,0 +1,17 @@
+[package]
+name = "joshgrade"
+version.workspace = true
+edition.workspace = true
+description = "JoshGrade – offline automatic photo correction and colour grading"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+grade-core = { path = "../crates/grade-core" }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"

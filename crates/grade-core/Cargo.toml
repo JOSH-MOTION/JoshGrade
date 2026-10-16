@@ -1,0 +1,13 @@
+[package]
+name = "grade-core"
+version.workspace = true
+edition.workspace = true
+description = "Offline automatic photo correction and colour grading engine"
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff", "webp", "rayon"] }
+rawler = "0.8"
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+img-parts = "0.3"
+thiserror = "2"

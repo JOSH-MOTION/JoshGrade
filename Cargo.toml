@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = ["crates/grade-core", "crates/grade-cli", "src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+# Image math is slow in debug builds; optimise dependencies even in dev.
+[profile.dev.package."*"]
+opt-level = 3
+[profile.dev.package.grade-core]
+opt-level = 3

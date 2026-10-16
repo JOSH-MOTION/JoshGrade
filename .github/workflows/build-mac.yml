@@ -1,0 +1,57 @@
+name: Build Mac app
+
+# Every push to main builds JoshGrade for Mac (Apple Silicon + Intel in one app)
+# and publishes the .dmg on the repo's Releases page.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-mac
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust (Apple Silicon + Intel targets)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: swatinem/rust-cache@v2
+
+      - name: Install JavaScript dependencies
+        run: npm ci
+
+      - name: Build app and publish release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__-build${{ github.run_number }}
+          releaseName: JoshGrade v__VERSION__ (build ${{ github.run_number }})
+          releaseBody: |
+            Download **JoshGrade_*_universal.dmg** below, open it and drag JoshGrade into Applications.
+
+            First launch: macOS will say it can't verify the developer. Open **System Settings › Privacy & Security**, scroll down and click **Open Anyway**. You only do this once.
+          releaseDraft: false
+          prerelease: false
+          args: --target universal-apple-darwin
+
+      - name: Keep a copy as a build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JoshGrade-mac
+          path: target/universal-apple-darwin/release/bundle/dmg/*.dmg

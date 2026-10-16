@@ -1,0 +1,11 @@
+[package]
+name = "grade-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "joshgrade-cli"
+path = "src/main.rs"
+
+[dependencies]
+grade-core = { path = "../grade-core" }

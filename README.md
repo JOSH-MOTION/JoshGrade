@@ -1,0 +1,108 @@
+# JoshGrade
+
+Offline automatic photo correction and colour grading for Mac.
+
+Drop in photos (JPEG, PNG, TIFF, WebP or camera RAW). JoshGrade measures each one, fixes what's wrong, applies a look, and saves the result. Nothing is uploaded; everything runs on your laptop.
+
+## What it fixes on its own
+
+Each photo is measured and corrected using standard editing rules:
+
+| Problem | Rule | What it does |
+|---|---|---|
+| Colour cast (yellow, blue, green, magenta) | Neutral things should be neutral | Finds whites and greys in the photo and balances them. Cross-checks the whole scene, so a blue sky or a yellow wall isn't mistaken for a cast. |
+| Too bright / too dark | Midtones should sit near mid-grey | Brings exposure down or up, but won't brighten a photo that's meant to be dark (stage, night, dark backgrounds) or darken a bright, airy one. |
+| Hazy, washed out | Use the full range | Sets a true black and a clean white. |
+| Crushed shadows | Keep detail in the darks | Opens up shadows gently. |
+| Flat or harsh | Healthy separation | Adds contrast to flat photos, softens very harsh ones. |
+| Bright highlights clipping | Highlights roll off, never clip | Smooth highlight recovery for skies, windows and white clothes. |
+| Dull or garish colour | Vibrance, not saturation | Lifts muted colour, calms loud colour. |
+| Skin | Skin is protected | Detects skin tones and keeps them out of colour shifts, so faces never go orange or grey. |
+
+The app lists exactly what it changed for each photo, under **What JoshGrade fixed**.
+
+## Looks
+
+On top of the correction, pick a look: **Natural**, **Warm**, **Cinematic**, **Moody**, **Bright & Airy**, **Film**, **Black & White**. The strength slider goes from 0% (original) to 150%. Double-click it to reset to 100%.
+
+## Using it with Photoshop
+
+Click **Export LUT for Photoshop** to save the current photo's grade as a `.cube` file. In Photoshop:
+
+1. Layer › New Adjustment Layer › Color Lookup
+2. 3DLUT File › Load 3D LUT… and pick the `.cube`
+
+The grade is now a non-destructive layer you can mask or lower in opacity. The LUT works in Premiere, DaVinci Resolve, Final Cut and Lightroom (via Profiles) too. It assumes an sRGB document.
+
+Tick **Also save a LUT for each photo** to get one `.cube` next to every graded file.
+
+## Install
+
+1. Go to the [Releases page](https://github.com/JOSH-MOTION/JoshGrade/releases/latest) and download **JoshGrade_…_universal.dmg**. It runs on Apple Silicon and Intel Macs.
+2. Open the .dmg and drag **JoshGrade** into **Applications**.
+3. First launch only: macOS says it can't verify the developer, because the app isn't registered with Apple. Open **System Settings › Privacy & Security**, scroll down and click **Open Anyway**.
+
+Share the same .dmg link with anyone who wants it. Nobody needs to install Rust or anything else.
+
+## How new versions are built
+
+Every push to `main` builds the Mac app on GitHub (see `.github/workflows/build-mac.yml`) and publishes a new release with the .dmg. You can also start a build by hand from the **Actions** tab › **Build Mac app** › **Run workflow**.
+
+To change the version number, edit `version` in `src-tauri/tauri.conf.json`.
+
+### Building on your own Mac (optional, for development)
+
+Needs Rust (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`) and Node.js 18+. Then:
+
+```bash
+npm install
+npm run app:dev   # run with live reload
+npm run app       # build JoshGrade.app + .dmg into target/release/bundle
+```
+
+## Command line
+
+There's also a command-line version for big batches:
+
+```bash
+npm run cli
+./target/release/joshgrade-cli --look cinematic --strength 0.8 --out ~/Desktop/Graded ~/Pictures/Wedding
+./target/release/joshgrade-cli --looks          # list looks
+```
+
+Options: `--look ID`, `--strength 0..1.5`, `--out DIR`, `--format jpeg|tiff|png`, `--lut`.
+
+## Output
+
+- **JPEG** (quality 95). When the original is a JPEG, the camera data (EXIF: date, camera, lens, orientation) and colour profile are copied across.
+- **TIFF 16-bit** / **PNG 16-bit** for further editing without banding. Recommended for RAW files.
+- Files are saved as `name_graded.jpg` in a `Graded` folder next to the originals (or a folder you choose). Originals are never touched.
+
+## How it's built
+
+```
+crates/grade-core   the engine (Rust): decode, analyse, grade, export LUT
+  decode.rs         JPEG/PNG/TIFF/WebP via `image`; RAW via `rawler` (incl. Canon CR3)
+  analyze.rs        the editing rules – read this to see every decision
+  grade.rs          turns the decisions into one per-pixel colour transform
+  looks.rs          the looks (each is a handful of numbers; easy to add more)
+  lut.rs            .cube export
+crates/grade-cli    command-line tool
+src-tauri           desktop app backend (Tauri 2)
+src                 desktop app interface (React + TypeScript)
+```
+
+Tauri uses the Mac's built-in WebKit instead of bundling Chrome, so the app is a few MB rather than 100+ MB.
+
+Because every correction is a single per-pixel transform, the on-screen preview, the saved photo and the exported LUT always match.
+
+## Limits
+
+- Blown-out areas (pure white in the original) can't be recovered; the app tells you when a photo has a lot of them.
+- Corrections are global (whole-photo). It doesn't do local edits like brushing a face brighter.
+- HEIC (iPhone) files aren't supported yet. Export them as JPEG first.
+- RAW support comes from `rawler` (LGPL-2.1). A few very new camera models may not be supported yet.
+
+## Next step: the trained grade
+
+Version 2 adds a small AI model trained on MIT-Adobe FiveK (5,000 photos each edited by professional retouchers) that predicts a per-photo LUT. It plugs into `grade.rs` as an extra stage and runs offline.
