@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, State};
 
+mod video;
+
 /// Decoded preview-size photo + analysis + "before" data, so sliders re-render instantly.
 struct Entry {
     photo: Photo,
@@ -287,6 +289,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(Arc::new(AppState::default()))
+        .manage(Arc::new(video::VideoState::default()))
         .invoke_handler(tauri::generate_handler![
             list_looks,
             collect_photos,
@@ -296,7 +299,18 @@ fn main() {
             export_lut,
             save_photo,
             save_batch,
-            cancel_batch
+            cancel_batch,
+            video::media_collect,
+            video::media_cancel,
+            video::sync_run,
+            video::sync_render,
+            video::sync_timeline,
+            video::caption_models,
+            video::caption_download,
+            video::caption_transcribe,
+            video::caption_cues,
+            video::caption_save,
+            video::caption_into_video
         ])
         .run(tauri::generate_context!())
         .expect("error while running JoshGrade");

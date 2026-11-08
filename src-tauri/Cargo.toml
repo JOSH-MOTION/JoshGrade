@@ -9,7 +9,9 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 grade-core = { path = "../crates/grade-core" }
-tauri = { version = "2", features = [] }
+media-core = { path = "../crates/media-core" }
+whisper-rs = "0.16"
+tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }

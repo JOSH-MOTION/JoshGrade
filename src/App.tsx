@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -88,7 +88,10 @@ function Slider({ label, tip, value, auto = 0, onChange, min = -100, max = 100, 
   );
 }
 
-export default function App() {
+export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactNode; active?: boolean }) {
+  // Only the visible workspace reacts to drops and shortcuts.
+  const activeRef = useRef(active);
+  activeRef.current = active;
   const [looks, setLooks] = useState<Look[]>([]);
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [selected, setSelected] = useState(0);
@@ -170,6 +173,7 @@ export default function App() {
   useEffect(() => {
     invoke<Look[]>("list_looks").then(setLooks);
     const un = getCurrentWebview().onDragDropEvent((e) => {
+      if (!activeRef.current) return;
       if (e.payload.type === "over" || e.payload.type === "enter") setDragOver(true);
       else if (e.payload.type === "drop") {
         setDragOver(false);
@@ -261,6 +265,7 @@ export default function App() {
   // ---------- keyboard: ← → photos, hold B for original, J for clipping
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
+      if (!activeRef.current) return;
       if ((e.target as HTMLElement).tagName === "INPUT" && (e.target as HTMLInputElement).type !== "range") return;
       if (e.metaKey || e.ctrlKey) return;
       if (e.key === "ArrowDown") setSelected((s) => Math.min(s + 1, photos.length - 1));
@@ -371,9 +376,10 @@ export default function App() {
   const auto: Adjust = showing?.auto_adjust ?? freshAdjust();
 
   return (
-    <div className={`app ${dragOver ? "drag-over" : ""}`}>
+    <div className={`app ${dragOver ? "drag-over" : ""}`} style={active ? undefined : { display: "none" }}>
       <header className="titlebar" data-tauri-drag-region>
         <span className="brand" data-tauri-drag-region>JoshGrade</span>
+        {modeSwitch}
         <div className="title-actions">
           <button onClick={pickFiles}>Add photos</button>
           <button onClick={pickFolder}>Add folder</button>

@@ -1,0 +1,13 @@
+[package]
+name = "media-core"
+version.workspace = true
+edition.workspace = true
+description = "JoshGrade video tools: audio sync (PluralEyes-style) and offline auto captions"
+
+[dependencies]
+rustfft = "6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+whisper-rs = "0.16"
+ureq = "2"

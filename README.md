@@ -65,6 +65,30 @@ The grade is now a non-destructive layer you can mask or lower in opacity. The L
 
 Tick **Also save a LUT for each photo** to get one `.cube` next to every graded file.
 
+## Video: sync audio (like PluralEyes)
+
+Switch to **Video › Sync audio**. Drop your camera clips and the separately recorded audio (Zoom, Tascam, lav recorder), or a whole card folder; JoshGrade sorts video from audio. Press **Sync**.
+
+- Each clip is placed where its sound matches the recording, accurate to well under a millisecond (a frame is 33–40 ms).
+- Works with very different microphones, echoey rooms, crowd noise and wind. Clips it can't place confidently are marked **check it** or **No match**, never silently placed in the wrong spot.
+- **Clock drift**: on clips longer than about 90 seconds JoshGrade measures how much the camera's clock and the recorder's clock disagree, and corrects it on export.
+- No recorder? Leave the recorder list empty and the cameras are lined up with each other (the longest clip is the reference).
+
+Exports:
+- **Save synced videos**: new files with the recorder's sound laid in. The picture is copied untouched (no re-encoding, no quality loss). Optionally keeps the camera's own sound as a second track. MOV gets 24-bit uncompressed audio; MP4 gets 320 kbps AAC.
+- **Export timeline (XML)**: every clip already in place over the recorder audio, cameras on separate tracks when they overlap. Premiere Pro: File › Import. DaVinci Resolve: File › Import › Timeline.
+
+## Video: auto captions
+
+Switch to **Video › Auto captions**, add a video and press **Generate captions**. Speech recognition runs on your Mac with Whisper (whisper.cpp); nothing is uploaded.
+
+- **Caption engine**: Fast (148 MB), Accurate (488 MB, recommended) or Best (574 MB). Each is a one-time download; after that captions work offline.
+- Language: detected automatically, or choose it. Option to translate into English. (Twi, Ga and Ewe aren't supported by the speech engine yet.)
+- Every caption is timed from word timings, split at natural pauses and sentence ends, at most 2 lines of 42 characters (broadcast standard) by default.
+- **Styles**: Classic, Box, and **Bold social** (2–3 words at a time, large capitals, placed in the lower third clear of TikTok/Reels buttons). Live preview over the video.
+- Edit any caption's text in the list; click a time to play from there.
+- **Save**: SRT (Premiere, CapCut, YouTube, Facebook), WebVTT, plain transcript; **Burn captions into the video** (H.264 MP4 for Instagram/TikTok/WhatsApp) or **Add as a caption track** (switchable, instant).
+
 ## Install
 
 **Easiest (builds it on your Mac):** open Terminal, paste this line and press Return:
@@ -73,7 +97,7 @@ Tick **Also save a LUT for each photo** to get one `.cube` next to every graded 
 curl -fsSL https://raw.githubusercontent.com/JOSH-MOTION/JoshGrade/main/install-mac.sh | bash
 ```
 
-It installs what's needed (Apple developer tools, Rust, Node.js), builds JoshGrade and puts it in Applications. Run the same line again any time to update.
+It installs what's needed (Apple developer tools, Rust, Node.js, ffmpeg, cmake), builds JoshGrade and puts it in Applications. Run the same line again any time to update.
 
 **Download instead:** once GitHub Actions is enabled on this account, every update also builds a ready-made .dmg:
 
@@ -127,6 +151,10 @@ crates/grade-core   the engine (Rust): decode, analyse, grade, export LUT
   looks.rs          the looks (each is a handful of numbers; easy to add more)
   lut.rs            .cube export
 crates/grade-cli    command-line tool
+crates/media-core   video tools (Rust): audio sync, Whisper captions, ffmpeg exports
+  sync.rs           loudness fingerprint + FFT cross-correlation, GCC-PHAT fine alignment, drift
+  captions.rs       Whisper transcription, word timing, caption layout, SRT/VTT, burn-in
+  export.rs         synced media files and Premiere/Resolve XML timelines
 src-tauri           desktop app backend (Tauri 2)
 src                 desktop app interface (React + TypeScript)
 ```
