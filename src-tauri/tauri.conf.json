@@ -55,6 +55,9 @@
     "externalBin": [
       "binaries/ffmpeg",
       "binaries/ffprobe"
-    ]
+    ],
+    "resources": {
+      "../public/fonts/": "fonts/"
+    }
   }
 }

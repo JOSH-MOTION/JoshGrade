@@ -59,6 +59,19 @@ fn main() {
             }
             let social = captions::build_cues(&tr.words, &captions::CueStyle { max_chars: 20, max_lines: 1, max_words: 3, uppercase: true });
             eprintln!("social style: {} captions, first: {:?}", social.len(), social.first().map(|c| &c.text));
+            if let (Some(tpls), Some(out)) = (flag("--templates"), flag("--out")) {
+                let fonts = flag("--fonts").map(PathBuf::from);
+                for id in tpls.split(',') {
+                    let t = templates::template(id).expect("template");
+                    let info = ffmpeg::probe(&tools, &video).unwrap();
+                    let cues = captions::build_cues(&tr.words, &templates::layout(t, info.width, info.height, 1.0));
+                    if let Some(a) = flag("--ass") {
+                        std::fs::write(format!("{a}.{id}.ass"), templates::to_ass(&cues, t, &templates::RenderOpts { width: 1080, height: 1920, scale: 1.0, position: String::new() })).unwrap();
+                    }
+                    let p = captions::burn_template(&tools, &video, &cues, &captions::TemplateStyle { template: id.into(), scale: 1.0, position: String::new() }, fonts.as_deref(), std::path::Path::new(&out)).unwrap();
+                    println!("{id}: {}", p.display());
+                }
+            }
             if let (Some(preset), Some(out)) = (flag("--burn"), flag("--out")) {
                 let style = captions::BurnStyle { preset: preset.clone(), size: 5.0, position: "bottom".into() };
                 let use_cues = if preset == "bold" { &social } else { &cues };
@@ -68,6 +81,7 @@ fn main() {
                 println!("soft track {}", p.display());
             }
         }
-        _ => eprintln!("usage: joshgrade-media sync|captions ..."),
+        Some("templates") => println!("{}", serde_json::to_string(&templates::TEMPLATES.to_vec()).unwrap()),
+        _ => eprintln!("usage: joshgrade-media sync|captions|templates ..."),
     }
 }

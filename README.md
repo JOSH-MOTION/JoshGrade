@@ -85,7 +85,13 @@ Switch to **Video › Auto captions**, add a video and press **Generate captions
 - **Caption engine**: Fast (148 MB), Accurate (488 MB, recommended) or Best (574 MB). Each is a one-time download; after that captions work offline.
 - Language: detected automatically, or choose it. Option to translate into English. (Twi, Ga and Ewe aren't supported by the speech engine yet.)
 - Every caption is timed from word timings, split at natural pauses and sentence ends, at most 2 lines of 42 characters (broadcast standard) by default.
-- **Styles**: Classic, Box, and **Bold social** (2–3 words at a time, large capitals, placed in the lower third clear of TikTok/Reels buttons). Live preview over the video.
+- **16 caption templates**, each with a live animated preview over your video:
+  - *Clean*: Classic, Box, Minimal (soft, spoken word highlighted), Typewriter (words type on)
+  - *Social*: Hormozi (heavy capitals, spoken word pops in yellow), Beast (comic capitals bouncing in, colour per word), Word Pop (one big word at a time), Yellow Bold, Bubble (white sticker box)
+  - *Music*: Karaoke (each word fills with gold as it's sung), Neon (pulsing glow), Cinematic (wide-spaced capitals, slow fade), Love Song (flowing script)
+  - *Stylish*: Marker (tilted hand lettering), Glitch (red/blue split snapping in), Editorial (italic serif sliding up)
+- Effects follow the word timings, so highlights land exactly on each word. Line length adapts to the video's shape (vertical or landscape), and size, position, lines and words-at-a-time can be changed.
+- Fonts are bundled (open licences: Montserrat, Anton, Bangers, Bebas Neue, Great Vibes, Permanent Marker, Space Mono, DM Serif Display, Poppins), so templates look the same on every Mac.
 - Edit any caption's text in the list; click a time to play from there.
 - **Save**: SRT (Premiere, CapCut, YouTube, Facebook), WebVTT, plain transcript; **Burn captions into the video** (H.264 MP4 for Instagram/TikTok/WhatsApp) or **Add as a caption track** (switchable, instant).
 
@@ -154,6 +160,7 @@ crates/grade-cli    command-line tool
 crates/media-core   video tools (Rust): audio sync, Whisper captions, ffmpeg exports
   sync.rs           loudness fingerprint + FFT cross-correlation, GCC-PHAT fine alignment, drift
   captions.rs       Whisper transcription, word timing, caption layout, SRT/VTT, burn-in
+  templates.rs      caption templates → animated ASS subtitles (libass)
   export.rs         synced media files and Premiere/Resolve XML timelines
 src-tauri           desktop app backend (Tauri 2)
 src                 desktop app interface (React + TypeScript)

@@ -1,6 +1,7 @@
 //! Video commands: PluralEyes-style audio sync and offline auto captions.
 
-use media_core::captions::{self, BurnStyle, Cue, CueStyle, TranscribeOptions, Transcript, Word};
+use media_core::captions::{self, Cue, CueStyle, TemplateStyle, TranscribeOptions, Transcript, Word};
+use media_core::templates::{self, Template};
 use media_core::export::{self, RenderOptions};
 use media_core::ffmpeg::{self, MediaInfo, Tools};
 use media_core::sync::{self, Match, SyncReport};
@@ -245,8 +246,28 @@ pub async fn caption_transcribe(app: AppHandle, state: VSt<'_>, path: String, mo
 }
 
 #[tauri::command]
-pub fn caption_cues(words: Vec<Word>, style: CueStyle) -> Vec<Cue> {
-    captions::build_cues(&words, &style)
+pub fn caption_templates() -> Vec<Template> {
+    templates::TEMPLATES.to_vec()
+}
+
+/// Split the words into captions for this template on a video of this size.
+/// `lines` / `words_at_once` override the template (0 = template default).
+#[tauri::command]
+pub fn caption_cues(words: Vec<Word>, template: String, width: u32, height: u32, scale: f32, lines: usize, words_at_once: usize) -> Result<Vec<Cue>, String> {
+    let tpl = templates::template(&template).ok_or("unknown template")?;
+    let mut style: CueStyle = templates::layout(tpl, width, height, scale);
+    if lines > 0 {
+        style.max_lines = lines;
+    }
+    if words_at_once > 0 {
+        style.max_words = words_at_once;
+    }
+    Ok(captions::build_cues(&words, &style))
+}
+
+fn fonts_dir(app: &AppHandle) -> Option<PathBuf> {
+    let dir = app.path().resource_dir().ok()?.join("fonts");
+    dir.is_dir().then_some(dir)
 }
 
 /// Save captions as a file: "srt", "vtt" or "txt".
@@ -274,19 +295,20 @@ pub struct IntoVideo {
     language: String,
     /// "track" (switchable, instant) or "burn" (into the picture).
     mode: String,
-    style: BurnStyle,
+    style: TemplateStyle,
     out_dir: String,
 }
 
 #[tauri::command]
-pub async fn caption_into_video(req: IntoVideo) -> Result<String, String> {
+pub async fn caption_into_video(app: AppHandle, req: IntoVideo) -> Result<String, String> {
+    let fonts = fonts_dir(&app);
     blocking(move || {
         let t = tools()?;
         let out = if req.mode == "burn" {
             if !t.can_burn_subtitles() {
                 return Err("This copy of ffmpeg can't burn in captions. Use 'caption track' instead.".into());
             }
-            captions::burn_captions(&t, Path::new(&req.path), &req.cues, &req.style, Path::new(&req.out_dir))
+            captions::burn_template(&t, Path::new(&req.path), &req.cues, &req.style, fonts.as_deref(), Path::new(&req.out_dir))
         } else {
             captions::add_caption_track(&t, Path::new(&req.path), &req.cues, &req.language, Path::new(&req.out_dir))
         };

@@ -283,6 +283,9 @@ pub struct Cue {
     pub start: f64,
     pub end: f64,
     pub text: String,
+    /// The recognised words in this caption (for word-by-word template effects).
+    #[serde(default)]
+    pub words: Vec<Word>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -330,7 +333,8 @@ pub fn build_cues(words: &[Word], style: &CueStyle) -> Vec<Cue> {
         }
         let text = wrap(&cur.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" "), style.max_chars, style.max_lines);
         let text = if style.uppercase { text.to_uppercase() } else { text };
-        cues.push(Cue { start: cur[0].start, end: cur[cur.len() - 1].end, text });
+        let words = cur.iter().map(|w| (*w).clone()).collect();
+        cues.push(Cue { start: cur[0].start, end: cur[cur.len() - 1].end, text, words });
         cur.clear();
     };
     for (i, w) in words.iter().enumerate() {
@@ -521,6 +525,45 @@ pub fn burn_captions(tools: &Tools, video: &Path, cues: &[Cue], style: &BurnStyl
     let stem = video.file_stem().and_then(|s| s.to_str()).unwrap_or("video");
     std::fs::create_dir_all(out_dir)?;
     let out = unique(out_dir, stem, "_captions", "mp4");
+    let out_abs = if out.is_absolute() { out.clone() } else { std::env::current_dir()?.join(&out) };
+    let video_abs = if video.is_absolute() { video.to_path_buf() } else { std::env::current_dir()?.join(video) };
+    let mut cmd = tools.ffmpeg_cmd();
+    cmd.current_dir(&work);
+    cmd.arg("-i").arg(&video_abs);
+    cmd.args(["-vf", &filter, "-map", "0:v:0", "-map", "0:a?", "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "256k", "-movflags", "+faststart"]);
+    cmd.arg(&out_abs);
+    let r = ffmpeg::run(cmd, "Burning in captions");
+    let _ = std::fs::remove_dir_all(&work);
+    r.map(|_| out_abs)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TemplateStyle {
+    pub template: String,
+    /// Size multiplier (1.0 = template default).
+    pub scale: f32,
+    /// "" = template default, or "bottom" / "lower" / "middle" / "top".
+    pub position: String,
+}
+
+/// Burn captions into the picture using an animated template and the bundled fonts.
+pub fn burn_template(tools: &Tools, video: &Path, cues: &[Cue], style: &TemplateStyle, fonts: Option<&Path>, out_dir: &Path) -> Result<PathBuf, Error> {
+    let tpl = crate::templates::template(&style.template).ok_or_else(|| Error::Other(format!("unknown caption template {}", style.template)))?;
+    let info = ffmpeg::probe(tools, video)?;
+    // Rotated phone videos report their stored size; the picture we burn onto is the displayed size.
+    let (w, h) = (info.width.max(16), info.height.max(16));
+    let ass = crate::templates::to_ass(cues, tpl, &crate::templates::RenderOpts { width: w, height: h, scale: style.scale, position: style.position.clone() });
+    let work = std::env::temp_dir().join(format!("joshgrade-burn-{}", std::process::id()));
+    std::fs::create_dir_all(&work)?;
+    std::fs::write(work.join("captions.ass"), ass)?;
+    let mut filter = String::from("ass=captions.ass");
+    let fd = fonts.map(|p| p.to_string_lossy().into_owned()).or_else(|| fonts_dir().map(String::from));
+    if let Some(fd) = fd {
+        let _ = write!(filter, ":fontsdir='{}'", fd.replace('\\', "/"));
+    }
+    let stem = video.file_stem().and_then(|s| s.to_str()).unwrap_or("video");
+    std::fs::create_dir_all(out_dir)?;
+    let out = unique(out_dir, stem, &format!("_{}", tpl.id), "mp4");
     let out_abs = if out.is_absolute() { out.clone() } else { std::env::current_dir()?.join(&out) };
     let video_abs = if video.is_absolute() { video.to_path_buf() } else { std::env::current_dir()?.join(video) };
     let mut cmd = tools.ffmpeg_cmd();

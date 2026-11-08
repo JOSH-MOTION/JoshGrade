@@ -119,3 +119,57 @@
 .video-app .group .save-hint { margin-top: 6px; }
 .video-app .group .primary.wide { margin-top: 12px; }
 .video-app .export .primary.wide, .video-app .export .save-hint { margin-top: 0; }
+
+/* ---------- caption template fonts (bundled, open licence) */
+@font-face { font-family: "Poppins"; src: url("/fonts/Poppins-Bold.ttf") format("truetype"); font-weight: 700; }
+@font-face { font-family: "Poppins SemiBold"; src: url("/fonts/Poppins-SemiBold.ttf") format("truetype"); font-weight: 400; }
+@font-face { font-family: "Space Mono"; src: url("/fonts/SpaceMono-Bold.ttf") format("truetype"); font-weight: 700; }
+@font-face { font-family: "Montserrat Black"; src: url("/fonts/Montserrat-Black.ttf") format("truetype"); }
+@font-face { font-family: "Montserrat ExtraBold"; src: url("/fonts/Montserrat-ExtraBold.ttf") format("truetype"); }
+@font-face { font-family: "Bangers"; src: url("/fonts/Bangers-Regular.ttf") format("truetype"); }
+@font-face { font-family: "Anton"; src: url("/fonts/Anton-Regular.ttf") format("truetype"); }
+@font-face { font-family: "Bebas Neue"; src: url("/fonts/BebasNeue-Regular.ttf") format("truetype"); }
+@font-face { font-family: "Great Vibes"; src: url("/fonts/GreatVibes-Regular.ttf") format("truetype"); }
+@font-face { font-family: "Permanent Marker"; src: url("/fonts/PermanentMarker-Regular.ttf") format("truetype"); }
+@font-face { font-family: "DM Serif Display"; src: url("/fonts/DMSerifDisplay-Italic.ttf") format("truetype"); font-style: italic; }
+
+/* ---------- template preview */
+.cap-frame { position: absolute; pointer-events: none; overflow: hidden; }
+.tpl-anchor { position: absolute; left: 0; right: 0; display: flex; justify-content: center; padding: 0 6%; pointer-events: none; }
+.tpl-anim { display: inline-block; max-width: 100%; text-align: center; }
+.tpl-anim > span { display: inline; }
+.a-fade { animation: t-fade .15s ease-out; }
+.a-slow_fade { animation: t-fade .42s ease-out; }
+.a-pop { animation: t-pop .17s ease-out; }
+.a-bounce { animation: t-bounce .22s ease-out; }
+.a-slide_up { animation: t-slide .26s ease-out; }
+.a-neon { animation: t-fade .22s ease-out, t-neon 1.2s ease-in-out infinite; }
+.a-glitch { animation: t-glitch .3s steps(6, end); }
+.w-pop { animation: w-pop .17s ease-out; }
+@keyframes t-fade { from { opacity: 0; } }
+@keyframes t-pop { 0% { transform: scale(.72); opacity: .4; } 55% { transform: scale(1.08); opacity: 1; } 100% { transform: scale(1); } }
+@keyframes t-bounce { 0% { transform: translateY(45%) scaleY(.82); } 60% { transform: translateY(0) scaleY(1.1); } 100% { transform: none; } }
+@keyframes t-slide { from { transform: translateY(40%); opacity: 0; } }
+@keyframes t-neon { 0%, 100% { filter: brightness(1); } 50% { filter: brightness(1.35) saturate(1.2); } }
+@keyframes t-glitch {
+  0% { filter: drop-shadow(-.14em -.04em 0 rgba(255,48,48,.85)) drop-shadow(.14em .04em 0 rgba(48,255,255,.85)); transform: scaleX(1.12); }
+  60% { filter: drop-shadow(-.05em 0 0 rgba(255,48,48,.6)) drop-shadow(.05em 0 0 rgba(48,255,255,.6)); }
+  100% { filter: none; transform: none; }
+}
+@keyframes w-pop { 0% { transform: scale(.88); } 55% { transform: scale(1.08); } 100% { transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .tpl-anim, .w-pop { animation: none !important; }
+}
+
+/* ---------- template gallery */
+.tpl-cat { margin: 12px 0 6px; font-size: 11px; color: var(--muted); }
+.tpl-cat:first-of-type { margin-top: 2px; }
+.tpl-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.tpl-tile { padding: 0; border: 2px solid transparent; border-radius: 7px; background: none; overflow: hidden; text-align: left; }
+.tpl-tile:hover:not(:disabled) { background: none; border-color: #555; }
+.tpl-tile.on { border-color: var(--accent); }
+.tpl-stage { position: relative; display: block; height: 62px; background: linear-gradient(135deg, #2c3a55, #6a3d33); overflow: hidden; }
+.tpl-stage .tpl-anchor { padding: 0 4px; }
+.tpl-name { display: block; padding: 3px 5px 4px; font-size: 11px; color: #cfcfcf; }
+.tpl-tile.on .tpl-name { color: #fff; }
+.tpl-desc { margin: 10px 0 0; font-size: 12px; color: var(--muted); min-height: 32px; }

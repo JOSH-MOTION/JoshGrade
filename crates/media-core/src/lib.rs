@@ -4,6 +4,7 @@ pub mod captions;
 pub mod export;
 pub mod ffmpeg;
 pub mod sync;
+pub mod templates;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

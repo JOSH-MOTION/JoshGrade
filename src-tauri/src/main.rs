@@ -308,6 +308,7 @@ fn main() {
             video::caption_models,
             video::caption_download,
             video::caption_transcribe,
+            video::caption_templates,
             video::caption_cues,
             video::caption_save,
             video::caption_into_video

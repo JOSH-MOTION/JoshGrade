@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { CaptionView, Template, TemplateTile } from "./CaptionTemplates";
 
 // ---------------------------------------------------------------- types
 type MediaInfo = {
@@ -19,7 +20,7 @@ type Match = {
 type Reference = { path: string; info: MediaInfo; envelope: number[] };
 type Report = { references: Reference[]; matches: Match[] };
 type Word = { text: string; start: number; end: number; prob: number };
-type Cue = { start: number; end: number; text: string };
+type Cue = { start: number; end: number; text: string; words: Word[] };
 type Transcript = { language: string; duration: number; words: Word[] };
 type ModelState = { id: string; label: string; size_mb: number; description: string; downloaded: boolean };
 type Step = { step: string; done: number; total: number };
@@ -103,18 +104,17 @@ export default function VideoApp({ modeSwitch, active }: { modeSwitch?: ReactNod
   const [transcripts, setTranscripts] = useState<Record<string, Transcript>>({});
   const [cues, setCues] = useState<Record<string, Cue[]>>({});
   const [capRun, setCapRun] = useState<{ percent: number; latest: string } | null>(null);
-  const [preset, setPreset] = useState<"classic" | "box" | "bold">("classic");
-  const [maxChars, setMaxChars] = useState(42);
-  const [maxLines, setMaxLines] = useState(2);
-  const [maxWords, setMaxWords] = useState(0);
-  const [upper, setUpper] = useState(false);
-  const [size, setSize] = useState(5);
-  const [position, setPosition] = useState("bottom");
+  const [templates, setTemplates] = useState<Template[]>([]);
+  const [tplId, setTplId] = useState("classic");
+  const [scale, setScale] = useState(1);
+  const [position, setPosition] = useState(""); // "" = the template's own position
+  const [lines, setLines] = useState(0); // 0 = template default
+  const [wordsAt, setWordsAt] = useState(0); // 0 = template default
   const [burning, setBurning] = useState<string | null>(null);
   const [now, setNow] = useState(0);
   const videoRef = useRef<HTMLVideoElement & HTMLAudioElement>(null);
   const playerRef = useRef<HTMLDivElement>(null);
-  const [videoBox, setVideoBox] = useState({ w: 0, h: 0, top: 0 });
+  const [videoBox, setVideoBox] = useState({ w: 0, h: 0, top: 0, left: 0 });
 
   // ---------- adding media
   const addPaths = useCallback(async (paths: string[]) => {
@@ -250,22 +250,21 @@ export default function VideoApp({ modeSwitch, active }: { modeSwitch?: ReactNod
   const itemCues = capItem ? cues[capItem.path] : undefined;
   const modelState = models.find((m) => m.id === model);
 
-  const cueStyle = useMemo(() => ({ max_chars: maxChars, max_lines: maxLines, max_words: maxWords, uppercase: upper }), [maxChars, maxLines, maxWords, upper]);
+  useEffect(() => {
+    invoke<Template[]>("caption_templates").then(setTemplates);
+  }, []);
+  const tpl = templates.find((t) => t.id === tplId);
+  const categories = useMemo(() => [...new Set(templates.map((t) => t.category))], [templates]);
+  const vw = capItem?.info?.width || 1920;
+  const vh = capItem?.info?.height || 1080;
 
-  // Re-split captions when the transcript or layout changes.
-  const styleKey = JSON.stringify(cueStyle);
+  // Re-split captions when the transcript, template or layout changes (fits the video's shape).
   useEffect(() => {
     if (!capItem || !transcript) return;
-    invoke<Cue[]>("caption_cues", { words: transcript.words, style: cueStyle }).then((c) => setCues((m) => ({ ...m, [capItem.path]: c })));
+    invoke<Cue[]>("caption_cues", { words: transcript.words, template: tplId, width: vw, height: vh, scale, lines, wordsAtOnce: wordsAt })
+      .then((c) => setCues((m) => ({ ...m, [capItem.path]: c })));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [capItem?.path, transcript, styleKey]);
-
-  const applyPreset = (p: "classic" | "box" | "bold") => {
-    setPreset(p);
-    if (p === "classic") { setMaxChars(42); setMaxLines(2); setMaxWords(0); setUpper(false); setSize(5); setPosition("bottom"); }
-    if (p === "box") { setMaxChars(38); setMaxLines(2); setMaxWords(0); setUpper(false); setSize(4.5); setPosition("bottom"); }
-    if (p === "bold") { setMaxChars(18); setMaxLines(1); setMaxWords(3); setUpper(true); setSize(7); setPosition("lower"); }
-  };
+  }, [capItem?.path, transcript, tplId, scale, lines, wordsAt, vw, vh]);
 
   const downloadModel = async () => {
     setDownload({ id: model, got: 0, total: (modelState?.size_mb ?? 0) * 1e6 });
@@ -315,7 +314,7 @@ export default function VideoApp({ modeSwitch, active }: { modeSwitch?: ReactNod
     setBurning(mode === "burn" ? "Burning captions into the video… this takes about as long as the video plays (or less)." : "Adding the caption track…");
     try {
       const out = await invoke<string>("caption_into_video", {
-        req: { path: capItem.path, cues: itemCues, language: transcript?.language ?? "en", mode, style: { preset, size, position }, out_dir: dir },
+        req: { path: capItem.path, cues: itemCues, language: transcript?.language ?? "en", mode, style: { template: tplId, scale, position }, out_dir: dir },
       });
       setToast({ text: `Saved ${baseName(out)}`, reveal: out });
     } catch (e) {
@@ -343,8 +342,9 @@ export default function VideoApp({ modeSwitch, active }: { modeSwitch?: ReactNod
       if (v && v.videoWidth) {
         const s = Math.min(W / v.videoWidth, H / v.videoHeight);
         const h = v.videoHeight * s;
-        setVideoBox({ w: v.videoWidth * s, h, top: (H - h) / 2 });
-      } else setVideoBox({ w: W, h: H, top: 0 });
+        const w = v.videoWidth * s;
+        setVideoBox({ w, h, top: (H - h) / 2, left: (W - w) / 2 });
+      } else setVideoBox({ w: W, h: H, top: 0, left: 0 });
     };
     measure();
     const ro = new ResizeObserver(measure);
@@ -572,19 +572,9 @@ export default function VideoApp({ modeSwitch, active }: { modeSwitch?: ReactNod
                       <audio ref={videoRef} src={convertFileSrc(capItem.path)} controls onTimeUpdate={(e) => setNow(e.currentTarget.currentTime)} />
                     </div>
                   )}
-                  {activeCue >= 0 && itemCues && (
-                    <div
-                      className={`cap-overlay cap-${preset} pos-${position}`}
-                      style={{
-                        top: videoBox.top,
-                        height: videoBox.h,
-                        fontSize: `${Math.max(10, (size / 100) * videoBox.h * 0.95)}px`,
-                        // same margins as the burned-in result (fractions of picture height)
-                        paddingBottom: position === "bottom" ? videoBox.h * 0.06 : position === "lower" ? videoBox.h * 0.25 : 0,
-                        paddingTop: position === "top" ? videoBox.h * 0.06 : 0,
-                      }}
-                    >
-                      <span>{itemCues[activeCue].text}</span>
+                  {activeCue >= 0 && itemCues && tpl && (
+                    <div className="cap-frame" style={{ top: videoBox.top, left: videoBox.left, width: videoBox.w, height: videoBox.h }}>
+                      <CaptionView tpl={tpl} cue={itemCues[activeCue]} t={now} frameW={videoBox.w} frameH={videoBox.h} scale={scale} position={position} cueKey={activeCue} />
                     </div>
                   )}
                 </div>
@@ -678,44 +668,29 @@ export default function VideoApp({ modeSwitch, active }: { modeSwitch?: ReactNod
             </div>
 
             <div className="group">
-              <h2>Style</h2>
-              <div className="seg presets" role="radiogroup" aria-label="Caption style">
-                {([["classic", "Classic"], ["box", "Box"], ["bold", "Bold social"]] as const).map(([id, label]) => (
-                  <button key={id} role="radio" aria-checked={preset === id} className={preset === id ? "on" : ""} onClick={() => applyPreset(id)}>{label}</button>
-                ))}
-              </div>
+              <h2>Caption template</h2>
+              {categories.map((cat) => (
+                <div key={cat}>
+                  <h3 className="tpl-cat">{cat}</h3>
+                  <div className="tpl-grid">
+                    {templates.filter((t) => t.category === cat).map((t) => (
+                      <TemplateTile key={t.id} tpl={t} selected={t.id === tplId} onPick={() => setTplId(t.id)} />
+                    ))}
+                  </div>
+                </div>
+              ))}
+              <p className="tpl-desc">{tpl?.description}</p>
               <div className="field-row">
                 <label className="field">
-                  <span>Lines</span>
-                  <select value={maxLines} onChange={(e) => setMaxLines(+e.target.value)}>
-                    <option value={1}>1 line</option>
-                    <option value={2}>2 lines</option>
-                  </select>
-                </label>
-                <label className="field">
-                  <span>Words per caption</span>
-                  <select value={maxWords} onChange={(e) => setMaxWords(+e.target.value)}>
-                    <option value={0}>As many as fit</option>
-                    {[1, 2, 3, 4, 6].map((n) => <option key={n} value={n}>{n}</option>)}
-                  </select>
-                </label>
-              </div>
-              <div className="field-row">
-                <label className="field">
-                  <span>Line length: {maxChars} characters</span>
-                  <input type="range" min={12} max={50} value={maxChars} onChange={(e) => setMaxChars(+e.target.value)} />
-                </label>
-              </div>
-              <div className="field-row">
-                <label className="field">
-                  <span>Text size: {size}%</span>
-                  <input type="range" min={3} max={10} step={0.5} value={size} onChange={(e) => setSize(+e.target.value)} />
+                  <span>Size: {Math.round(scale * 100)}%</span>
+                  <input type="range" min={0.6} max={1.6} step={0.05} value={scale} onChange={(e) => setScale(+e.target.value)} onDoubleClick={() => setScale(1)} />
                 </label>
               </div>
               <div className="field-row">
                 <label className="field">
                   <span>Position</span>
                   <select value={position} onChange={(e) => setPosition(e.target.value)}>
+                    <option value="">Template default</option>
                     <option value="bottom">Bottom</option>
                     <option value="lower">Lower third (clear of TikTok / Reels buttons)</option>
                     <option value="middle">Middle</option>
@@ -723,11 +698,24 @@ export default function VideoApp({ modeSwitch, active }: { modeSwitch?: ReactNod
                   </select>
                 </label>
               </div>
-              <label className="check">
-                <input type="checkbox" checked={upper} onChange={(e) => setUpper(e.target.checked)} />
-                CAPITAL LETTERS
-              </label>
-              {transcript && <p className="save-hint">Changing lines, words or line length re-splits the captions, which resets text edits.</p>}
+              <div className="field-row">
+                <label className="field">
+                  <span>Lines</span>
+                  <select value={lines} onChange={(e) => setLines(+e.target.value)}>
+                    <option value={0}>Template default</option>
+                    <option value={1}>1 line</option>
+                    <option value={2}>2 lines</option>
+                  </select>
+                </label>
+                <label className="field">
+                  <span>Words at a time</span>
+                  <select value={wordsAt} onChange={(e) => setWordsAt(+e.target.value)}>
+                    <option value={0}>Template default</option>
+                    {[1, 2, 3, 4, 6].map((n) => <option key={n} value={n}>{n}</option>)}
+                  </select>
+                </label>
+              </div>
+              <p className="save-hint">Line length fits your video's shape automatically. Changing template, size, lines or words re-splits the captions, which resets text edits.</p>
             </div>
 
             <div className="group export">
