@@ -126,6 +126,7 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [selected, setSelected] = useState(0);
   const [settingsMap, setSettingsMap] = useState<Record<string, Settings>>({});
+  const [multi, setMulti] = useState<Set<string>>(new Set());
   const [lastUsed, setLastUsed] = useState<Settings>(freshSettings);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [loading, setLoading] = useState(false);
@@ -185,9 +186,22 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
   };
   // A photo takes your latest settings the first time you open it, then keeps its own.
   useEffect(() => {
-    if (current && !settingsMap[current.path]) setSettingsMap((m) => ({ ...m, [current.path]: clone(lastUsed) }));
+    if (current && !settingsMap[current.path]) setSettingsMap((m) => ({ ...m, [current.path]: { ...clone(lastUsed), crop: freshCrop() } }));
   }, [current?.path]);
 
+  // ---------- history (undo / redo), per photo
+  const history = useRef<Record<string, { past: Settings[]; future: Settings[]; last: number }>>({});
+  const remember = (path: string, before: Settings) => {
+    const h = (history.current[path] ??= { past: [], future: [], last: 0 });
+    const now = Date.now();
+    // a slider drag is one step: only record if the last change was a moment ago
+    if (now - h.last > 700) {
+      h.past.push(clone(before));
+      if (h.past.length > 200) h.past.shift();
+    }
+    h.last = now;
+    h.future = [];
+  };
   const update = useCallback(
     (fn: (s: Settings) => void) => {
       if (!current) {
@@ -197,14 +211,75 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
         return;
       }
       setSettingsMap((m) => {
-        const s = clone(m[current.path] ?? lastUsed);
+        const prev = m[current.path] ?? lastUsed;
+        const s = clone(prev);
         fn(s);
-        setLastUsed(clone(s));
+        if (JSON.stringify(s) === JSON.stringify(prev)) return m;
+        remember(current.path, prev);
+        setLastUsed({ ...clone(s), crop: freshCrop() });
         return { ...m, [current.path]: s };
       });
     },
     [current, lastUsed],
   );
+  const undo = (redo = false) => {
+    if (!current) return;
+    const h = history.current[current.path];
+    if (!h) return;
+    const from = redo ? h.future : h.past;
+    const to = redo ? h.past : h.future;
+    const s = from.pop();
+    if (!s) return;
+    to.push(clone(settingsMap[current.path] ?? lastUsed));
+    h.last = 0;
+    setSettingsMap((m) => ({ ...m, [current.path]: s }));
+  };
+  const canUndo = !!(current && history.current[current.path]?.past.length);
+  const canRedo = !!(current && history.current[current.path]?.future.length);
+
+  // ---------- copy / paste settings, presets
+  const [clip, setClip] = useState<Settings | null>(null);
+  const copySettings = () => {
+    setClip(clone(settings));
+    setToast({ text: "Settings copied. Select another photo and press ⌘V (or Paste) to use them." });
+  };
+  const pasteSettings = (targets?: string[]) => {
+    if (!clip) return;
+    const paths = targets ?? (current ? [current.path] : []);
+    for (const p of paths) {
+      const prev = settingsMap[p] ?? lastUsed;
+      remember(p, prev);
+    }
+    // the crop belongs to each photo; everything else is pasted
+    setSettingsMap((m) => ({ ...m, ...Object.fromEntries(paths.map((p) => [p, { ...clone(clip), crop: (m[p] ?? lastUsed).crop ?? freshCrop() }])) }));
+    if (paths.length > 1) setToast({ text: `Pasted onto ${paths.length} photos.` });
+  };
+  type Preset = { name: string; settings: Settings };
+  const [presets, setPresets] = useState<Preset[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem("joshgrade.presets") ?? "[]");
+    } catch {
+      return [];
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("joshgrade.presets", JSON.stringify(presets));
+    } catch {
+      /* not critical */
+    }
+  }, [presets]);
+  const [naming, setNaming] = useState<string | null>(null);
+  const savePreset = () => {
+    const name = (naming ?? "").trim();
+    if (!name) return;
+    const { crop: _c, ...rest } = clone(settings);
+    void _c;
+    setPresets((p) => [...p.filter((x) => x.name !== name), { name, settings: { ...rest, crop: freshCrop() } }]);
+    setNaming(null);
+    setToast({ text: `Saved preset "${name}". It's under Look › Your presets.` });
+  };
+  const applyPreset = (pr: Preset) => update((s) => void Object.assign(s, { ...clone(pr.settings), crop: s.crop }));
   const setAdj = (key: keyof Omit<Adjust, "hue" | "sat" | "lum">) => (v: number) => update((s) => void (s.adjust[key] = v));
   const setBandAdj = (key: "hue" | "sat" | "lum") => (v: number) => update((s) => void (s.adjust[key][band] = v));
 
@@ -320,12 +395,31 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [current?.path, thumbKey]);
 
+  const keyActs = useRef({ undo: (_r: boolean) => {}, copy: () => {}, paste: () => {} });
+  keyActs.current = { undo, copy: copySettings, paste: () => pasteSettings(multi.size > 1 ? [...multi] : undefined) };
+
   // ---------- keyboard: ← → photos, hold B for original, J for clipping
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
       if (!activeRef.current) return;
       if ((e.target as HTMLElement).tagName === "INPUT" && (e.target as HTMLInputElement).type !== "range") return;
-      if (e.metaKey || e.ctrlKey) return;
+      if (e.metaKey || e.ctrlKey) {
+        const k = e.key.toLowerCase();
+        if (k === "z") {
+          e.preventDefault();
+          keyActs.current.undo(e.shiftKey);
+        } else if (k === "y") {
+          e.preventDefault();
+          keyActs.current.undo(true);
+        } else if (k === "c" && !window.getSelection()?.toString()) {
+          e.preventDefault();
+          keyActs.current.copy();
+        } else if (k === "v") {
+          e.preventDefault();
+          keyActs.current.paste();
+        }
+        return;
+      }
       if (e.key === "ArrowDown") setSelected((s) => Math.min(s + 1, photos.length - 1));
       if (e.key === "ArrowUp") setSelected((s) => Math.max(s - 1, 0));
       if (e.key.toLowerCase() === "b" && !e.repeat) setShowBefore(true);
@@ -350,10 +444,13 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
     setSelected((s) => (i < s ? s - 1 : s));
   };
 
-  const applyToAll = () => {
+  const applyToAll = (paths?: string[]) => {
     const s = clone(settings);
-    setSettingsMap(Object.fromEntries(photos.map((p) => [p.path, clone(s)])));
-    setToast({ text: `These settings now apply to all ${photos.length} photos. Each one still gets its own automatic correction.` });
+    const targets = paths ?? photos.map((p) => p.path);
+    for (const p of targets) if (settingsMap[p]) remember(p, settingsMap[p]);
+    // each photo keeps its own crop
+    setSettingsMap((m) => ({ ...m, ...Object.fromEntries(targets.map((p) => [p, { ...clone(s), crop: m[p]?.crop ?? freshCrop() }])) }));
+    setToast({ text: `These settings now apply to ${paths ? targets.length : `all ${targets.length}`} photos. Each one still gets its own automatic correction.` });
   };
 
   const resetAdjust = () => update((s) => void (s.adjust = freshAdjust()));
@@ -450,7 +547,25 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
           <ul>
             {photos.map((p, i) => (
               <li key={p.path} className={i === selected ? "on" : ""}>
-                <button className="strip-item" onClick={() => setSelected(i)} title={p.path}>
+                <button
+                  className={`strip-item ${multi.has(p.path) ? "multi" : ""}`}
+                  onClick={(e) => {
+                    if (e.metaKey || e.ctrlKey) {
+                      setMulti((m) => {
+                        const n = new Set(m.size ? m : current ? [current.path] : []);
+                        n.has(p.path) ? n.delete(p.path) : n.add(p.path);
+                        return n;
+                      });
+                    } else if (e.shiftKey) {
+                      const [a, b] = [Math.min(selected, i), Math.max(selected, i)];
+                      setMulti(new Set(photos.slice(a, b + 1).map((x) => x.path)));
+                    } else {
+                      setMulti(new Set());
+                      setSelected(i);
+                    }
+                  }}
+                  title={`${p.path}\n⌘-click or Shift-click to select several`}
+                >
                   {p.thumb && p.thumb !== "none" ? <img src={p.thumb} alt="" /> : <span className="thumb-wait" />}
                   <span className="strip-name">{p.name}</span>
                   {p.saved && <span className="badge ok" title={p.saved}>Saved</span>}
@@ -550,6 +665,26 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
 
       {/* -------- controls */}
       <section className="panel" aria-label="Grade settings">
+        <div className="group workflow">
+          <div className="wf-row">
+            <button className="chip" onClick={() => undo()} disabled={!canUndo} title="Undo (⌘Z)">↶ Undo</button>
+            <button className="chip" onClick={() => undo(true)} disabled={!canRedo} title="Redo (⇧⌘Z)">↷ Redo</button>
+            <span className="wf-sep" />
+            <button className="chip" onClick={copySettings} disabled={!current} title="Copy settings (⌘C)">Copy</button>
+            <button className="chip" onClick={() => pasteSettings(multi.size > 1 ? [...multi] : undefined)} disabled={!clip || !current} title="Paste settings (⌘V)">
+              Paste{multi.size > 1 ? ` to ${multi.size}` : ""}
+            </button>
+            <span className="wf-sep" />
+            <button className="chip" onClick={() => setNaming(naming === null ? "" : null)} disabled={!current} title="Save these settings as your own preset">Save preset</button>
+          </div>
+          {naming !== null && (
+            <form className="preset-name" onSubmit={(e) => (e.preventDefault(), savePreset())}>
+              <input autoFocus placeholder="Preset name, e.g. Wedding warm" value={naming} onChange={(e) => setNaming(e.target.value)} onKeyDown={(e) => e.key === "Escape" && setNaming(null)} />
+              <button className="primary" type="submit" disabled={!naming.trim()}>Save</button>
+            </form>
+          )}
+        </div>
+
         {/* scopes */}
         <div className="group scopes">
           <div className="row">
@@ -639,6 +774,19 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
             ))}
           </div>
           <p className="look-desc">{looks.find((l) => l.id === settings.look)?.description}</p>
+          {presets.length > 0 && (
+            <div className="presets">
+              <span className="field-label">Your presets</span>
+              <div className="preset-chips">
+                {presets.map((pr) => (
+                  <span key={pr.name} className="preset-chip">
+                    <button onClick={() => applyPreset(pr)} title="Apply this preset">{pr.name}</button>
+                    <button className="x" aria-label={`Delete preset ${pr.name}`} onClick={() => setPresets((p) => p.filter((x) => x.name !== pr.name))}>×</button>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
           <Slider label="Strength" tip="s_strength" value={Math.round(settings.strength * 100)} min={0} max={200} suffix="%" onChange={(v) => update((s) => void (s.strength = v / 100))} />
         </div>
 
@@ -790,7 +938,11 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
           {photos.length > 1 && (
             <>
               <button className="wide" disabled={batch?.running} onClick={saveAll}>Save all {photos.length} photos…</button>
-              <button className="wide quiet" onClick={applyToAll}>Use these settings for all photos</button>
+              {multi.size > 1 ? (
+                <button className="wide quiet" onClick={() => applyToAll([...multi])}>Use these settings for the {multi.size} selected photos</button>
+              ) : (
+                <button className="wide quiet" onClick={() => applyToAll()}>Use these settings for all photos</button>
+              )}
             </>
           )}
           <button className="wide quiet" disabled={!current || !showing} onClick={exportLut}>Export LUT for Photoshop</button>
