@@ -1,5 +1,6 @@
 import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { EditItem, EditTab } from "./EditTab";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -74,7 +75,8 @@ function Spinner() {
 
 // ---------------------------------------------------------------- app
 export default function VideoApp({ modeSwitch, active }: { modeSwitch?: ReactNode; active: boolean }) {
-  const [tab, setTab] = useState<"sync" | "captions">("sync");
+  const [tab, setTab] = useState<"sync" | "captions" | "edit">("sync");
+  const [editItems, setEditItems] = useState<EditItem[]>([]);
   const [toast, setToast] = useState<{ text: string; reveal?: string } | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const activeRef = useRef(active);
@@ -110,7 +112,7 @@ export default function VideoApp({ modeSwitch, active }: { modeSwitch?: ReactNod
   const [position, setPosition] = useState(""); // "" = the template's own position
   const [lines, setLines] = useState(0); // 0 = template default
   const [wordsAt, setWordsAt] = useState(0); // 0 = template default
-  const [burning, setBurning] = useState<string | null>(null);
+  const burning: string | null = null;
   const [now, setNow] = useState(0);
   const videoRef = useRef<HTMLVideoElement & HTMLAudioElement>(null);
   const playerRef = useRef<HTMLDivElement>(null);
@@ -134,6 +136,9 @@ export default function VideoApp({ modeSwitch, active }: { modeSwitch?: ReactNod
       setClips((p) => merge(p, good.filter((i) => i.kind === "video")));
       setRecs((p) => merge(p, good.filter((i) => i.kind === "audio")));
       setReport(null);
+    } else if (tabRef.current === "edit") {
+      setEditItems((p) => merge(p as Item[], good.filter((i) => i.kind === "video")) as unknown as EditItem[]);
+      if (good.some((i) => i.kind !== "video")) setToast({ text: "Edit works on videos; audio files were skipped." });
     } else {
       setCapItems((p) => merge(p, good));
     }
@@ -216,13 +221,12 @@ export default function VideoApp({ modeSwitch, active }: { modeSwitch?: ReactNod
     if (!synced.length) return;
     const dir = await open({ directory: true, title: "Choose a folder for the synced videos", defaultPath: dirName(synced[0].clip) });
     if (typeof dir !== "string") return;
-    setRender({ done: 0, total: synced.length, running: true, dir, failed: 0 });
     try {
-      await invoke("sync_render", { matches: synced, outDir: dir, options: { keep_camera_audio: keepCam, fix_drift: fixDrift } });
+      await invoke("job_sync_render", { matches: synced, outDir: dir, options: { keep_camera_audio: keepCam, fix_drift: fixDrift } });
+      setToast({ text: `Saving ${synced.length} synced video${synced.length > 1 ? "s" : ""} in the background. Follow it in Jobs (bottom left) and keep working.` });
     } catch (e) {
       setToast({ text: String(e) });
     }
-    setRender((r) => r && { ...r, running: false });
   };
 
   const saveTimeline = async () => {
@@ -311,16 +315,14 @@ export default function VideoApp({ modeSwitch, active }: { modeSwitch?: ReactNod
     if (!capItem || !itemCues) return;
     const dir = await open({ directory: true, title: mode === "burn" ? "Where should the captioned video go?" : "Where should the video with captions go?", defaultPath: dirName(capItem.path) });
     if (typeof dir !== "string") return;
-    setBurning(mode === "burn" ? "Burning captions into the video… this takes about as long as the video plays (or less)." : "Adding the caption track…");
     try {
-      const out = await invoke<string>("caption_into_video", {
+      await invoke("job_caption_video", {
         req: { path: capItem.path, cues: itemCues, language: transcript?.language ?? "en", mode, style: { template: tplId, scale, position }, out_dir: dir },
       });
-      setToast({ text: `Saved ${baseName(out)}`, reveal: out });
+      setToast({ text: `${mode === "burn" ? "Burning captions" : "Adding the caption track"} in the background. Follow it in Jobs (bottom left). You can caption the next video now.` });
     } catch (e) {
       setToast({ text: String(e) });
     }
-    setBurning(null);
   };
 
   const activeCue = itemCues?.findIndex((c) => now >= c.start && now <= c.end) ?? -1;
@@ -366,6 +368,7 @@ export default function VideoApp({ modeSwitch, active }: { modeSwitch?: ReactNod
         <div className="tabs" role="tablist" aria-label="Video tools">
           <button role="tab" aria-selected={tab === "sync"} className={tab === "sync" ? "on" : ""} onClick={() => setTab("sync")}>Sync audio</button>
           <button role="tab" aria-selected={tab === "captions"} className={tab === "captions" ? "on" : ""} onClick={() => setTab("captions")}>Auto captions</button>
+          <button role="tab" aria-selected={tab === "edit"} className={tab === "edit" ? "on" : ""} onClick={() => setTab("edit")}>Edit</button>
         </div>
         <div className="title-actions">
           {tab === "sync" ? (
@@ -374,12 +377,14 @@ export default function VideoApp({ modeSwitch, active }: { modeSwitch?: ReactNod
               <button onClick={() => pick("audio")}>Add recorder audio</button>
             </>
           ) : (
-            <button onClick={() => pick("any")}>Add videos</button>
+            <button onClick={() => pick(tab === "edit" ? "video" : "any")}>Add videos</button>
           )}
         </div>
       </header>
 
-      {tab === "sync" ? (
+      {tab === "edit" ? (
+        <EditTab items={editItems} setItems={setEditItems} toast={(text) => setToast({ text })} />
+      ) : tab === "sync" ? (
         <>
           {/* ---------- inputs */}
           <aside className="strip media-lists" aria-label="Files to sync">
@@ -740,7 +745,7 @@ export default function VideoApp({ modeSwitch, active }: { modeSwitch?: ReactNod
         </>
       )}
 
-      {dragOver && <div className="drop-veil">{tab === "sync" ? "Drop clips and audio" : "Drop videos to caption"}</div>}
+      {dragOver && <div className="drop-veil">{tab === "sync" ? "Drop clips and audio" : tab === "edit" ? "Drop videos to edit" : "Drop videos to caption"}</div>}
       {toast && (
         <div className="toast" role="status">
           <span>{toast.text}</span>

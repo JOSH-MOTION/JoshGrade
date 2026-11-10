@@ -1783,6 +1783,9 @@ name = "grade-cli"
 version = "0.1.0"
 dependencies = [
  "grade-core",
+ "image",
+ "rayon",
+ "serde_json",
 ]
 
 [[package]]
@@ -1794,6 +1797,7 @@ dependencies = [
  "rawler",
  "rayon",
  "serde",
+ "serde_json",
  "thiserror 2.0.21",
  "tract-onnx",
 ]

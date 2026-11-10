@@ -11,6 +11,7 @@ pub mod color;
 pub mod decode;
 pub mod encode;
 pub mod grade;
+pub mod learn;
 pub mod looks;
 pub mod lut;
 pub mod report;

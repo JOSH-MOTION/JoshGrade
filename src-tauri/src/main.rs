@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, State};
 
+mod jobs;
 mod video;
 
 /// Decoded preview-size photo + analysis + "before" data, so sliders re-render instantly.
@@ -404,6 +405,7 @@ fn main() {
         })
         .manage(Arc::new(AppState::default()))
         .manage(Arc::new(video::VideoState::default()))
+        .manage(Arc::new(jobs::Jobs::default()))
         .invoke_handler(tauri::generate_handler![
             list_looks,
             collect_photos,
@@ -416,6 +418,14 @@ fn main() {
             cancel_batch,
             retouch_model,
             retouch_download,
+            jobs::jobs_list,
+            jobs::job_cancel,
+            jobs::jobs_clear,
+            jobs::job_sync_render,
+            jobs::job_caption_video,
+            jobs::job_edit_export,
+            jobs::edit_find_pauses,
+            jobs::edit_graded_frame,
             video::media_collect,
             video::media_cancel,
             video::sync_run,

@@ -107,6 +107,20 @@ Switch to **Video › Auto captions**, add a video and press **Generate captions
 - Edit any caption's text in the list; click a time to play from there.
 - **Save**: SRT (Premiere, CapCut, YouTube, Facebook), WebVTT, plain transcript; **Burn captions into the video** (H.264 MP4 for Instagram/TikTok/WhatsApp) or **Add as a caption track** (switchable, instant).
 
+## Video: edit
+
+**Video › Edit** does the everyday cuts without opening Premiere:
+
+- **Trim and cut**: mark a start (I) and end (O), then *Keep only this part* or *Cut this part out*. The timeline shows what stays (green) and what's cut (striped). Press play to watch the edit, with the cut parts skipped.
+- **Remove pauses**: finds the quiet gaps between words and takes them out, leaving a little breath so speech doesn't sound chopped. You can set the sensitivity and the shortest pause to cut.
+- **Join**: add several clips and they become one video in list order (↑ ↓ to reorder). Different sizes are fitted to the first clip's frame.
+- **Grade**: your photo looks work on video too. One grade is worked out from frames across all the clips, so every shot matches, and the paused frame shows it live.
+- **Export**: one MP4 (hardware H.264 on Mac). Cuts get tiny audio fades, so they never click.
+
+## Background jobs
+
+Exports run in the background: saving synced videos, burning captions and edit exports. **Jobs** (bottom left) shows each one's progress, lets you stop it and opens the result. You can run several at once and keep grading photos while they run.
+
 ## Install
 
 **Easiest (builds it on your Mac):** open Terminal, paste this line and press Return:

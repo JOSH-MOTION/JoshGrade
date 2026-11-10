@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import VideoApp from "./VideoApp";
+import { JobsTray } from "./Jobs";
 import "./styles.css";
 import "./video.css";
 
@@ -20,6 +21,7 @@ function Root() {
     <>
       <App modeSwitch={sw} active={mode === "photo"} />
       <VideoApp modeSwitch={sw} active={mode === "video"} />
+      <JobsTray />
     </>
   );
 }

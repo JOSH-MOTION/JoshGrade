@@ -11,6 +11,31 @@ fn main() {
     let cancel = AtomicBool::new(false);
     let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     match args.first().map(|s| s.as_str()) {
+        // joshgrade-media edit OUT.mp4 CLIP[@s-e,s-e] ... [--nosilence] [--lut F.cube]
+        Some("edit") => {
+            let out = PathBuf::from(&args[1]);
+            let mut clips = vec![];
+            for a in args[2..].iter().filter(|a| !a.starts_with("--") && !a.ends_with(".cube")) {
+                let (p, segs) = a.split_once('@').unwrap_or((a.as_str(), ""));
+                let mut keep: Vec<edit::Segment> = segs.split(',').filter(|x| !x.is_empty()).map(|r| {
+                    let (x, y) = r.split_once('-').unwrap();
+                    edit::Segment { start: x.parse().unwrap(), end: y.parse().unwrap() }
+                }).collect();
+                let info = ffmpeg::probe(&tools, std::path::Path::new(p)).unwrap();
+                if args.iter().any(|a| a == "--nosilence") {
+                    let sil = edit::find_silences(&tools, std::path::Path::new(p), -35.0, 0.5, &cancel).unwrap();
+                    println!("{p}: {} pauses", sil.len());
+                    keep = edit::keep_without(&sil, info.duration, 0.12);
+                    println!("  keep {:?}", keep.iter().map(|s| (s.start * 100.0).round() / 100.0..(s.end * 100.0).round() / 100.0).collect::<Vec<_>>());
+                }
+                clips.push(edit::EditClip { path: p.to_string(), info: Some(info), keep });
+            }
+            let opts = edit::ExportOptions { lut: flag("--lut"), ..Default::default() };
+            let t = std::time::Instant::now();
+            let mut last = 0.0;
+            edit::export(&tools, &clips, &opts, &out, &cancel, |p| { if p - last > 0.25 { last = p; eprintln!("  {:.0}%", p * 100.0); } }).unwrap();
+            println!("wrote {} in {:.1}s", out.display(), t.elapsed().as_secs_f64());
+        }
         Some("sync") => {
             let mut refs = vec![];
             let mut clips = vec![];

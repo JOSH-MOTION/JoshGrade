@@ -1,6 +1,7 @@
 //! JoshGrade video tools: PluralEyes-style audio sync and offline auto captions.
 
 pub mod captions;
+pub mod edit;
 pub mod export;
 pub mod ffmpeg;
 pub mod sync;
