@@ -105,6 +105,7 @@ pub fn analyze(photo: &Photo) -> Analysis {
     let rules = analyze_rules(photo);
     let Some(model) = crate::learn::model() else { return rules };
     let c = model.predict(&crate::learn::features(photo, &rules.params));
+    let c = crate::learn::anchor_brightness(c, photo, &rules.params);
     let (mut params, sat) = c.to_auto(&rules.params);
     params.saturation = sat;
     // Keep the rules' colour-band notes (they still apply); describe the rest from the result.

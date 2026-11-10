@@ -203,6 +203,24 @@ fn load_raw(path: &Path) -> Result<(DynamicImage, Orientation), Error> {
             px.data.iter().flat_map(|p| [to_display(p[0]), to_display(p[1]), to_display(p[2])]).collect(),
         ),
     };
+    let mut flat = flat;
+    // Look like the camera: fit the camera's own rendering (its embedded JPEG) and apply it
+    // to the RAW data, so colours and brightness match what you saw on the back of the
+    // camera — with the RAW's extra highlight and shadow detail.
+    if std::env::var_os("JOSHGRADE_FLAT_RAW").is_none() {
+        let preview = (|| {
+            let src = RawSource::new(path).ok()?;
+            let decoder = rawler::get_decoder(&src).ok()?;
+            let params = RawDecodeParams::default();
+            decoder
+                .preview_image(&src, &params)
+                .ok()
+                .flatten()
+                .or_else(|| decoder.thumbnail_image(&src, &params).ok().flatten())
+        })();
+        let m = preview.and_then(|p| crate::camera::fit(&flat, w, h, &p)).unwrap_or_else(crate::camera::CameraLook::standard);
+        m.apply(&mut flat);
+    }
     let buf = Rgb32FImage::from_raw(w as u32, h as u32, flat)
         .ok_or_else(|| Error::Raw("RAW buffer size mismatch".into()))?;
     Ok((DynamicImage::ImageRgb32F(buf), orientation))

@@ -300,3 +300,58 @@ pub fn describe(c: &Correction) -> Vec<String> {
     }
     n
 }
+
+/// Median L* of a photo after a correction (on a small copy), overall and on skin.
+fn median_l2(small: &Photo, c: &Correction, base: &AutoParams) -> (f32, Option<f32>) {
+    let (a, sat) = c.to_auto(base);
+    let look = crate::find_look("normal").unwrap();
+    let adj = crate::Adjust { saturation: sat * 100.0, ..Default::default() };
+    let g = crate::Grade::with_adjust(&a, &look.params, &adj, 1.0);
+    let mut l = Vec::with_capacity(small.data.len());
+    let mut sk = Vec::new();
+    for p in &small.data {
+        let v = lab(g.apply_px(*p))[0];
+        l.push(v);
+        if skin_weight(*p) > 0.5 {
+            sk.push(v);
+        }
+    }
+    let med = |v: &mut Vec<f32>| {
+        let k = v.len() / 2;
+        *v.select_nth_unstable_by(k, |a, b| a.partial_cmp(b).unwrap()).1
+    };
+    let skin = if sk.len() > small.data.len() / 50 { Some(med(&mut sk)) } else { None };
+    (med(&mut l), skin)
+}
+
+fn median_l(small: &Photo, c: &Correction, base: &AutoParams) -> f32 {
+    median_l2(small, c, base).0
+}
+
+/// Guard rail on the learned grade's overall brightness. A photo that is already well
+/// exposed stays within a few steps of its own brightness (the model may restyle it, not
+/// darken or wash it out); other photos are left to the model (it
+/// knows night scenes should stay dark and high-key should stay bright).
+pub fn anchor_brightness(c: Correction, photo: &Photo, rules: &AutoParams) -> Correction {
+    let small = crate::decode::shrink_photo(photo, 160);
+    let input = median_l(&small, &Correction::identity(), rules);
+    if !(38.0..=72.0).contains(&input) {
+        return c; // dark or bright on purpose (night, high-key) or badly exposed: trust the model
+    }
+    let (lo, hi) = (input - 6.0, input + 6.0);
+    let skin_in = median_l2(&small, &Correction::identity(), rules).1;
+    let mut c = c;
+    for _ in 0..8 {
+        let (m, skin) = median_l2(&small, &c, rules);
+        // faces must not get darker than they were
+        let skin_short = match (skin_in, skin) {
+            (Some(a), Some(b)) if b < a - 2.0 && m < hi => (a - 2.0 - b).min(hi - m),
+            _ => 0.0,
+        };
+        let diff = if m < lo { lo - m } else if m > hi { hi - m } else if skin_short > 0.5 { skin_short } else { break };
+        // ~ 1 stop ≈ 15 L* around the mids
+        c.0[0] += (diff + diff.signum() * 1.0) / 15.0;
+        c = c.clamped();
+    }
+    c
+}

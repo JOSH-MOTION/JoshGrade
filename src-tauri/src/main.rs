@@ -297,6 +297,35 @@ async fn save_photo(path: String, settings: Settings, dest: String, format: Outp
     .await
 }
 
+/// Save the graded photo as a 16-bit TIFF next to the original and open it in Photoshop.
+#[tauri::command]
+async fn open_in_photoshop(path: String, settings: Settings) -> Result<String, String> {
+    blocking(move || {
+        let input = PathBuf::from(&path);
+        let dir = input.parent().map(|d| d.join("JoshGrade for Photoshop")).ok_or("bad path")?;
+        let dest = grade_core::unique_output(&input, &dir, OutputFormat::Tiff);
+        let r = grade_core::save_graded(&input, &dest, &settings, OutputFormat::Tiff, 95, false).map_err(|e| e.to_string())?;
+        let out = r.output.to_string_lossy().into_owned();
+        #[cfg(target_os = "macos")]
+        {
+            let by_id = std::process::Command::new("open").args(["-b", "com.adobe.Photoshop"]).arg(&out).status().map(|s| s.success()).unwrap_or(false);
+            let ok = by_id
+                || ["Adobe Photoshop 2026", "Adobe Photoshop 2025", "Adobe Photoshop 2024", "Adobe Photoshop"]
+                    .iter()
+                    .any(|app| std::process::Command::new("open").args(["-a", app]).arg(&out).status().map(|s| s.success()).unwrap_or(false));
+            if !ok {
+                return Err(format!("Saved {} but couldn't find Photoshop on this Mac.", r.output.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let _ = std::process::Command::new("cmd").args(["/C", "start", "", "photoshop.exe"]).arg(&out).status();
+        }
+        Ok(out)
+    })
+    .await
+}
+
 #[tauri::command]
 fn cancel_batch(state: St<'_>) {
     *state.cancel.lock().unwrap() = true;
@@ -417,6 +446,7 @@ fn main() {
             save_batch,
             cancel_batch,
             retouch_model,
+            open_in_photoshop,
             retouch_download,
             jobs::jobs_list,
             jobs::job_cancel,

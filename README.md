@@ -66,7 +66,14 @@ Each photo keeps its own settings. **Use these settings for all photos** copies 
 
 Nothing is saved until you click **Save this photo…** (you pick the name and folder) or **Save all photos…** (you pick a folder). Originals are never changed, and existing files are never overwritten.
 
+## RAW files look like your camera
+
+A RAW file developed with no styling looks flat and grey next to the camera's own picture. Every RAW carries the camera's JPEG inside it, so JoshGrade measures the camera's rendering from it (its tone curve and its colour style, e.g. Canon Picture Style) and applies the same to the RAW data. The starting point looks like the back of your camera, with the RAW's extra highlight and shadow detail.
+
 ## Using it with Photoshop
+
+**Open in Photoshop** (under Save) sends the photo to Photoshop as a full-quality 16-bit TIFF, graded and retouched. It's saved in a "JoshGrade for Photoshop" folder next to the original.
+
 
 Click **Export LUT for Photoshop** to save the current photo's grade as a `.cube` file. In Photoshop:
 

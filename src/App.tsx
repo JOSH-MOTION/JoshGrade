@@ -359,6 +359,17 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
     }
   };
 
+  const toPhotoshop = async () => {
+    if (!current) return;
+    setToast({ text: "Preparing a full-quality 16-bit TIFF for Photoshop…" });
+    try {
+      const out = await invoke<string>("open_in_photoshop", { path: current.path, settings: eff(settings) });
+      setToast({ text: `Opened ${baseName(out)} in Photoshop.`, reveal: out });
+    } catch (e) {
+      setToast({ text: String(e) });
+    }
+  };
+
   const saveAll = async () => {
     if (!photos.length) return;
     const dir = await open({ directory: true, title: "Choose a folder for the graded photos", defaultPath: dirName(photos[0].path) });
@@ -744,6 +755,8 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
           )}
 
           <button className="primary wide" disabled={!current || !showing} onClick={saveOne}>Save this photo…</button>
+          <button className="wide" disabled={!current || !showing} onClick={toPhotoshop}>Open in Photoshop</button>
+          <p className="save-hint">Sends a full-quality 16-bit TIFF (graded and retouched) to Photoshop, saved in a "JoshGrade for Photoshop" folder next to the original.</p>
           {photos.length > 1 && (
             <>
               <button className="wide" disabled={batch?.running} onClick={saveAll}>Save all {photos.length} photos…</button>

@@ -7,6 +7,7 @@
 
 pub mod adjust;
 pub mod analyze;
+pub mod camera;
 pub mod color;
 pub mod decode;
 pub mod encode;

@@ -159,6 +159,7 @@ fn main() {
             cases.into_iter().map(|(k, img)| {
                 let an = analyze(&img);
                 let c = model.predict(&learn::features(&img, &an.params));
+                let c = if std::env::var_os("ANCHOR").is_some() { learn::anchor_brightness(c, &img, &an.params) } else { c };
                 let small = grade_core::decode::shrink_photo(&img, 170);
                 let g = grade_core::grade_with(&an, &Settings { look: "natural".into(), ..Default::default() }).unwrap();
                 (k.to_string(), delta_e(&render(&small, &c, &an.params), &target), delta_e(&g.apply(&small), &target), delta_e(&small, &target))
