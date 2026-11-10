@@ -6,7 +6,7 @@
 //! JoshGrade correction that best reproduces the expert, and writes the photo's features,
 //! that correction and how close each method gets (mean ΔE, lower is better).
 
-use grade_core::analyze::{analyze, AutoParams};
+use grade_core::analyze::{analyze_rules as analyze, AutoParams};
 use grade_core::color::Rgb;
 use grade_core::learn::{self, lab, Correction, RANGES};
 use grade_core::{find_look, Adjust, Grade, Photo, Settings};
@@ -123,6 +123,32 @@ fn degrade(ex: &Photo, seed: u64) -> Photo {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.len() >= 5 && args[1] == "eval" {
+        // gradefit eval MODEL.json PAIRS_DIR IDS.txt  -> mean ΔE of the model per case kind
+        let model = learn::Model::parse(&std::fs::read_to_string(&args[2]).unwrap()).unwrap();
+        let dir = Path::new(&args[3]);
+        let ids: Vec<String> = std::fs::read_to_string(&args[4]).unwrap().lines().map(String::from).collect();
+        let res: Vec<(String, f32, f32, f32)> = ids.par_iter().flat_map(|id| {
+            let ex = load(&dir.join(format!("{id}_ex.png")));
+            let seed = id.parse::<u64>().unwrap_or(1);
+            let cases = vec![("fivek", load(&dir.join(format!("{id}_in.png")))), ("good", ex.clone()), ("bad", degrade(&ex, seed))];
+            let ex_small = grade_core::decode::shrink_photo(&ex, 170);
+            let target: Vec<[f32; 3]> = ex_small.data.iter().map(|p: &Rgb| lab(*p)).collect();
+            cases.into_iter().map(|(k, img)| {
+                let an = analyze(&img);
+                let c = model.predict(&learn::features(&img, &an.params));
+                let small = grade_core::decode::shrink_photo(&img, 170);
+                let g = grade_core::grade_with(&an, &Settings { look: "natural".into(), ..Default::default() }).unwrap();
+                (k.to_string(), delta_e(&render(&small, &c, &an.params), &target), delta_e(&g.apply(&small), &target), delta_e(&small, &target))
+            }).collect::<Vec<_>>()
+        }).collect();
+        for k in ["fivek", "bad", "good"] {
+            let r: Vec<_> = res.iter().filter(|x| x.0 == k).collect();
+            let n = r.len().max(1) as f32;
+            println!("{k:6} n={:4}  model {:.2}   old auto {:.2}   untouched {:.2}", r.len(), r.iter().map(|x| x.1).sum::<f32>() / n, r.iter().map(|x| x.2).sum::<f32>() / n, r.iter().map(|x| x.3).sum::<f32>() / n);
+        }
+        return;
+    }
     if args.len() < 4 || args[1] != "fit" {
         eprintln!("gradefit fit PAIRS_DIR OUT.jsonl [--aug]");
         std::process::exit(2);

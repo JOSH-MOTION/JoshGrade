@@ -85,7 +85,7 @@ impl Grade {
             band_lum[i] = auto.hsl_lum[i] + adj.band_lum(i);
             band_hue[i] = adj.band_hue_deg(i);
         }
-        let sat = look.sat + adj.saturation_amt();
+        let sat = look.sat + adj.saturation_amt() + auto.saturation;
 
         Grade {
             gain,

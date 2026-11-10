@@ -73,7 +73,7 @@ pub fn auto_sliders(p: &crate::AutoParams) -> Adjust {
         temp: r(temp * 330.0),
         tint: r(tint * 250.0),
         vibrance: r(p.vibrance * 160.0),
-        saturation: 0.0,
+        saturation: r(p.saturation * 100.0),
         hue: [0.0; 8],
         sat: p.hsl_sat.map(|v| r((v - 1.0) * 100.0)),
         lum: p.hsl_lum.map(|v| r(v * 400.0)),

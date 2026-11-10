@@ -185,6 +185,10 @@ pub struct Model {
 }
 
 impl Model {
+    pub fn parse(json: &str) -> Result<Model, String> {
+        serde_json::from_str(json).map_err(|e| e.to_string())
+    }
+
     pub fn predict(&self, x: &[f32]) -> Correction {
         let mut out = [0f32; 10];
         for (k, e) in self.targets.iter().enumerate().take(10) {
@@ -207,4 +211,54 @@ const MODEL_JSON: &str = include_str!("../models/grade_model.json");
 
 pub fn model() -> Option<&'static Model> {
     MODEL.get_or_init(|| serde_json::from_str(MODEL_JSON).ok()).as_ref()
+}
+
+/// Plain-English description of a correction, for the app's notes.
+pub fn describe(c: &Correction) -> Vec<String> {
+    let p = &c.0;
+    let mut n = vec![];
+    if p[0] > 0.15 {
+        n.push(format!("Brightened the photo {:.1} stops", p[0]));
+    } else if p[0] < -0.15 {
+        n.push(format!("Brought exposure down {:.1} stops", -p[0]));
+    }
+    if p[1] > 0.04 {
+        n.push("Warmed the colour (it was too cool / blue)".into());
+    } else if p[1] < -0.04 {
+        n.push("Cooled the colour (it was too warm / yellow)".into());
+    }
+    if p[2] > 0.03 {
+        n.push("Removed a green tint".into());
+    } else if p[2] < -0.03 {
+        n.push("Removed a magenta tint".into());
+    }
+    if p[3] > 0.04 {
+        n.push("Set a true black point (it looked hazy)".into());
+    }
+    if p[4] < 0.93 {
+        n.push("Brightened the whites".into());
+    }
+    if p[5] > 0.06 {
+        n.push("Opened up the shadows".into());
+    } else if p[5] < -0.06 {
+        n.push("Deepened the shadows".into());
+    }
+    if p[6] > 0.06 {
+        n.push("Added contrast".into());
+    } else if p[6] < -0.06 {
+        n.push("Softened contrast".into());
+    }
+    if p[7] < 0.85 {
+        n.push("Recovered bright highlights".into());
+    }
+    let col = p[8] + p[9];
+    if col > 0.08 {
+        n.push("Richer colour".into());
+    } else if col < -0.08 {
+        n.push("Calmer colour".into());
+    }
+    if n.is_empty() {
+        n.push("Photo was already well graded – left it almost untouched".into());
+    }
+    n
 }

@@ -33,13 +33,15 @@ pub struct AutoParams {
     /// and brightness change, used to calm colours that are too strong.
     pub hsl_sat: [f32; 8],
     pub hsl_lum: [f32; 8],
+    /// Global saturation change (learned grade; 0 = none).
+    pub saturation: f32,
 }
 
 impl AutoParams {
     pub fn identity() -> Self {
         AutoParams {
             wb_gains: [1.0; 3], exposure_ev: 0.0, black: 0.0, white: 1.0, shadows: 0.0,
-            contrast: 0.0, highlight_knee: 0.92, vibrance: 0.0, hsl_sat: [1.0; 8], hsl_lum: [0.0; 8],
+            contrast: 0.0, highlight_knee: 0.92, vibrance: 0.0, hsl_sat: [1.0; 8], hsl_lum: [0.0; 8], saturation: 0.0,
         }
     }
 }
@@ -97,7 +99,28 @@ fn sample(photo: &Photo, max: usize) -> Vec<Rgb> {
     photo.data.iter().step_by(step).copied().collect()
 }
 
+/// The full analysis: the editing rules, refined by the grade learned from professional
+/// retouchers (when the learned model is available).
 pub fn analyze(photo: &Photo) -> Analysis {
+    let rules = analyze_rules(photo);
+    let Some(model) = crate::learn::model() else { return rules };
+    let c = model.predict(&crate::learn::features(photo, &rules.params));
+    let (mut params, sat) = c.to_auto(&rules.params);
+    params.saturation = sat;
+    // Keep the rules' colour-band notes (they still apply); describe the rest from the result.
+    let mut notes: Vec<String> = rules
+        .notes
+        .iter()
+        .filter(|n| n.contains("so strong") || n.contains("clipping") || n.contains("Skin"))
+        .cloned()
+        .collect();
+    let mut head = crate::learn::describe(&c);
+    head.append(&mut notes);
+    Analysis { params, notes: head, stats: rules.stats }
+}
+
+/// The rule-based analysis on its own (also the starting point for the learned grade).
+pub fn analyze_rules(photo: &Photo) -> Analysis {
     let px = sample(photo, 300_000);
     let n = px.len().max(1) as f32;
     let mut notes = Vec::new();
@@ -338,7 +361,7 @@ pub fn analyze(photo: &Photo) -> Analysis {
     }
     let mut params = AutoParams {
         wb_gains: gains, exposure_ev: ev, black, white, shadows, contrast, highlight_knee, vibrance,
-        hsl_sat: [1.0; 8], hsl_lum: [0.0; 8],
+        hsl_sat: [1.0; 8], hsl_lum: [0.0; 8], saturation: 0.0,
     };
 
     // ---------------------------------------------------------------- per-colour balance
