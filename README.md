@@ -209,6 +209,16 @@ Because every correction is a single per-pixel transform, the on-screen preview,
 - HEIC (iPhone) files open on Mac only (through macOS's built-in converter).
 - RAW support comes from `rawler` (LGPL-2.1). A few very new camera models may not be supported yet.
 
-## Next step: the trained grade
+## The learned grade
 
-Version 2 adds a small AI model trained on MIT-Adobe FiveK (5,000 photos each edited by professional retouchers) that predicts a per-photo LUT. It plugs into `grade.rs` as an extra stage and runs offline.
+The auto grade learns from professional retouchers. For each of ~960 photos from MIT-Adobe FiveK (each one edited by a pro), JoshGrade worked out the exact settings that reproduce the pro's edit. It did the same for already-good photos (answer: leave them alone) and for deliberately spoiled ones (answer: undo the damage). A small model (boosted trees plus "what did pros do to the most similar photos") predicts those settings for a new photo from what a colourist looks at: brightness spread, colour casts in shadows, mids and highlights, colourfulness, clipping and skin. The editing rules' own answer is one of its inputs.
+
+Distance from the pro edit on photos it never saw (mean ΔE, lower is better):
+
+| Photos | Untouched | Old auto | Learned auto |
+|---|---|---|---|
+| Camera files edited by pros | 13.5 | 13.5 | **9.7** |
+| Badly shot / processed | 10.8 | 9.8 | **7.6** |
+| Already good (should stay) | 0 | 7.5 | **3.2** |
+
+It's 3 MB, runs instantly and fully offline. Retrain it with `gradefit fit` + `train.py` (see `crates/grade-cli/src/bin/gradefit.rs`).

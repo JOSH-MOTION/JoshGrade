@@ -123,6 +123,28 @@ fn degrade(ex: &Photo, seed: u64) -> Photo {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.len() >= 4 && args[1] == "evalpred" {
+        // gradefit evalpred PRED.json PAIRS_DIR : PRED = {"id/kind": [10 params], ...}
+        let preds: std::collections::HashMap<String, Vec<f32>> = serde_json::from_str(&std::fs::read_to_string(&args[2]).unwrap()).unwrap();
+        let dir = Path::new(&args[3]);
+        let mut keys: Vec<&String> = preds.keys().collect();
+        keys.sort();
+        let res: Vec<(String, f32)> = keys.par_iter().map(|key| {
+            let (id, kind) = key.split_once('/').unwrap();
+            let ex = load(&dir.join(format!("{id}_ex.png")));
+            let img = match kind { "fivek" => load(&dir.join(format!("{id}_in.png"))), "good" => ex.clone(), _ => degrade(&ex, id.parse::<u64>().unwrap_or(1)) };
+            let an = analyze(&img);
+            let p = &preds[*key];
+            let c = Correction(std::array::from_fn(|i| p[i])).clamped();
+            let target: Vec<[f32; 3]> = grade_core::decode::shrink_photo(&ex, 170).data.iter().map(|p: &Rgb| lab(*p)).collect();
+            (kind.to_string(), delta_e(&render(&grade_core::decode::shrink_photo(&img, 170), &c, &an.params), &target))
+        }).collect();
+        for k in ["fivek", "bad", "good"] {
+            let r: Vec<_> = res.iter().filter(|x| x.0 == k).collect();
+            println!("{k:6} n={:4} {:.2}", r.len(), r.iter().map(|x| x.1).sum::<f32>() / r.len().max(1) as f32);
+        }
+        return;
+    }
     if args.len() >= 5 && args[1] == "eval" {
         // gradefit eval MODEL.json PAIRS_DIR IDS.txt  -> mean ΔE of the model per case kind
         let model = learn::Model::parse(&std::fs::read_to_string(&args[2]).unwrap()).unwrap();

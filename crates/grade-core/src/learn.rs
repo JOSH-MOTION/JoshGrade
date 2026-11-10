@@ -178,10 +178,41 @@ struct Ensemble {
     trees: Vec<Tree>,
 }
 
+/// Nearest neighbours: the corrections pros made to the most similar photos.
+#[derive(Deserialize)]
+struct Knn {
+    k: usize,
+    mean: Vec<f32>,
+    std: Vec<f32>,
+    x: Vec<Vec<f32>>,
+    y: Vec<Vec<f32>>,
+}
+
+impl Knn {
+    fn predict(&self, x: &[f32]) -> [f32; 10] {
+        let q: Vec<f32> = x.iter().zip(&self.mean).zip(&self.std).map(|((v, m), s)| (v - m) / s).collect();
+        let mut d: Vec<(f32, usize)> = self.x.iter().enumerate().map(|(i, r)| (r.iter().zip(&q).map(|(a, b)| (a - b) * (a - b)).sum::<f32>().sqrt(), i)).collect();
+        let k = self.k.min(d.len());
+        d.select_nth_unstable_by(k.saturating_sub(1), |a, b| a.0.partial_cmp(&b.0).unwrap());
+        let mut out = [0f32; 10];
+        let mut wsum = 0.0;
+        for &(dist, i) in &d[..k] {
+            let w = 1.0 / dist.max(1e-6);
+            wsum += w;
+            for j in 0..10 {
+                out[j] += w * self.y[i][j];
+            }
+        }
+        out.map(|v| v / wsum.max(1e-9))
+    }
+}
+
 #[derive(Deserialize)]
 pub struct Model {
     pub n_features: usize,
     targets: Vec<Ensemble>,
+    #[serde(default)]
+    knn: Option<Knn>,
 }
 
 impl Model {
@@ -202,6 +233,13 @@ impl Model {
             }
             out[k] = y;
         }
+        // average of the trees and the nearest neighbours (better than either alone)
+        if let Some(knn) = &self.knn {
+            let n = knn.predict(x);
+            for k in 0..10 {
+                out[k] = 0.5 * (out[k] + n[k]);
+            }
+        }
         Correction(out).clamped()
     }
 }
@@ -210,7 +248,7 @@ static MODEL: OnceLock<Option<Model>> = OnceLock::new();
 const MODEL_JSON: &str = include_str!("../models/grade_model.json");
 
 pub fn model() -> Option<&'static Model> {
-    MODEL.get_or_init(|| serde_json::from_str(MODEL_JSON).ok()).as_ref()
+    MODEL.get_or_init(|| if std::env::var_os("JOSHGRADE_RULES_ONLY").is_some() { None } else { serde_json::from_str(MODEL_JSON).ok() }).as_ref()
 }
 
 /// Plain-English description of a correction, for the app's notes.
