@@ -23,6 +23,9 @@ fn main() {
                 }
             }
             "--lut" => write_lut = true,
+            "--retouch" => settings.retouch.enabled = true,
+            "--no-auto" => settings.auto = false,
+            "--smooth" => settings.retouch.smooth = args.next().and_then(|s| s.parse().ok()).unwrap_or(0.45),
             "--looks" => {
                 for l in all_looks() {
                     println!("{:10} {}", l.id, l.description);
@@ -30,7 +33,7 @@ fn main() {
                 return;
             }
             "-h" | "--help" => {
-                println!("joshgrade-cli [--look ID] [--strength 0..2] [--out DIR] [--format jpeg|tiff|png] [--lut] PHOTOS_OR_FOLDERS...\njoshgrade-cli --looks   (list looks)");
+                println!("joshgrade-cli [--look ID] [--strength 0..2] [--out DIR] [--format jpeg|tiff|png] [--lut] [--retouch [--smooth 0..1]] [--no-auto] PHOTOS_OR_FOLDERS...\njoshgrade-cli --looks   (list looks)");
                 return;
             }
             _ => inputs.push(PathBuf::from(a)),

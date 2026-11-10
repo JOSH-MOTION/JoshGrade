@@ -11,3 +11,4 @@ rayon = "1"
 serde = { version = "1", features = ["derive"] }
 img-parts = "0.3"
 thiserror = "2"
+tract-onnx = "0.21"

@@ -13,12 +13,14 @@ type Adjust = {
   temp: number; tint: number; vibrance: number; saturation: number;
   hue: number[]; sat: number[]; lum: number[];
 };
-type Settings = { auto: boolean; look: string; strength: number; adjust: Adjust };
+type Retouch = { enabled: boolean; blemishes: number; smooth: number; even: number; shine: number; keep_moles: boolean; keep_freckles: boolean };
+type Settings = { auto: boolean; look: string; strength: number; adjust: Adjust; retouch: Retouch };
 type ReportLine = { key: string; label: string; before: string; after: string; verdict: string; status: "good" | "warn" | "info" };
 type Photo = { path: string; name: string; thumb?: string; saved?: string; error?: string };
 type Preview = {
   path: string; after: string; overlay?: string | null; width: number; height: number;
   report: ReportLine[]; auto_adjust: Adjust; scopes_before: ScopeData; scopes_after: ScopeData;
+  retouch?: { faces: number } | null;
 };
 type Progress = { index: number; total: number; file: string; ok: boolean; output?: string; error?: string };
 type Format = "jpeg" | "tiff" | "png";
@@ -32,7 +34,8 @@ const freshAdjust = (): Adjust => ({
   exposure: 0, contrast: 0, highlights: 0, shadows: 0, temp: 0, tint: 0, vibrance: 0, saturation: 0,
   hue: ZERO8(), sat: ZERO8(), lum: ZERO8(),
 });
-const freshSettings = (): Settings => ({ auto: true, look: "natural", strength: 1, adjust: freshAdjust() });
+const freshRetouch = (): Retouch => ({ enabled: false, blemishes: 1, smooth: 0.45, even: 0.5, shine: 0.35, keep_moles: true, keep_freckles: true });
+const freshSettings = (): Settings => ({ auto: true, look: "natural", strength: 1, adjust: freshAdjust(), retouch: freshRetouch() });
 const clone = (s: Settings): Settings => JSON.parse(JSON.stringify(s));
 
 const EXTENSIONS = [
@@ -45,6 +48,24 @@ const baseName = (p: string) => p.split(/[\\/]/).pop() ?? p;
 const dirName = (p: string) => p.slice(0, Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\")));
 const stem = (p: string) => baseName(p).replace(/\.[^.]+$/, "");
 const isRaw = (p: string) => /\.(cr2|cr3|crw|nef|nrw|arw|srf|sr2|raf|rw2|rwl|orf|pef|dng|srw|3fr|fff|iiq|mos|erf|kdc|dcr|mrw|x3f)$/i.test(p);
+
+/** 0–100% slider for retouch amounts (double-click = default). */
+function Amount({ label, tip, value, def, onChange }: { label: string; tip: string; value: number; def: number; onChange: (v: number) => void }) {
+  const id = `r-${tip}`;
+  return (
+    <div className="slider">
+      <div className="slider-head">
+        <label htmlFor={id} onDoubleClick={() => onChange(def)} title="Double-click for the default">
+          <Tip k={tip}>{label}</Tip>
+        </label>
+        <output className={Math.abs(value - def) > 0.005 ? "changed" : ""}>{Math.round(value * 100)}%</output>
+      </div>
+      <div className="slider-track">
+        <input id={id} type="range" min={0} max={100} step={1} value={Math.round(value * 100)} onChange={(e) => onChange(+e.target.value / 100)} onDoubleClick={() => onChange(def)} />
+      </div>
+    </div>
+  );
+}
 
 /** A slider that shows auto + your change. `auto` is what JoshGrade chose; moving the slider
  *  stores only your change on top, so the auto grade is never lost. */
@@ -124,7 +145,30 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
   }, [photos.length, selected]);
 
   const current = photos[selected] as Photo | undefined;
-  const settings: Settings = (current && settingsMap[current.path]) || lastUsed;
+  const stored: Settings = (current && settingsMap[current.path]) || lastUsed;
+  const settings: Settings = stored.retouch ? stored : { ...stored, retouch: freshRetouch() };
+  // Retouch engine: the face map model is downloaded once, then everything runs offline.
+  const [rModel, setRModel] = useState<{ ready: boolean; size_mb: number } | null>(null);
+  const [rDl, setRDl] = useState<{ got: number; total: number } | null>(null);
+  const [rErr, setRErr] = useState<string | null>(null);
+  useEffect(() => {
+    invoke<{ ready: boolean; size_mb: number }>("retouch_model").then(setRModel).catch(() => {});
+    const un = listen<{ got: number; total: number }>("retouch-download", (e) => setRDl(e.payload));
+    return () => void un.then((f) => f());
+  }, []);
+  // What actually gets rendered/saved: retouch only once its engine is there.
+  const eff = (s: Settings): Settings => (s.retouch?.enabled && !rModel?.ready ? { ...s, retouch: { ...s.retouch, enabled: false } } : s);
+  const downloadRetouch = async () => {
+    setRErr(null);
+    setRDl({ got: 0, total: (rModel?.size_mb ?? 53) * 1e6 });
+    try {
+      await invoke("retouch_download");
+      setRModel((m) => ({ size_mb: m?.size_mb ?? 53, ready: true }));
+    } catch (e) {
+      setRErr(String(e));
+    }
+    setRDl(null);
+  };
   // A photo takes your latest settings the first time you open it, then keeps its own.
   useEffect(() => {
     if (current && !settingsMap[current.path]) setSettingsMap((m) => ({ ...m, [current.path]: clone(lastUsed) }));
@@ -228,7 +272,7 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
     const id = ++reqId.current;
     setLoading(true);
     const t = setTimeout(() => {
-      invoke<Preview & { before?: string | null }>("preview", { path, settings, withBefore: !beforeCache.current[path], clipping })
+      invoke<Preview & { before?: string | null }>("preview", { path, settings: eff(settings), withBefore: !beforeCache.current[path], clipping })
         .then((p) => {
           if (p.before) beforeCache.current[path] = p.before;
           if (id === reqId.current) {
@@ -244,7 +288,7 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
     }, 70);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current?.path, settingsKey, clipping]);
+  }, [current?.path, settingsKey, clipping, rModel?.ready]);
 
   const thumbKey = JSON.stringify({ a: settings.adjust, s: settings.strength });
   useEffect(() => {
@@ -307,7 +351,7 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
     if (!dest) return;
     setToast({ text: `Saving ${baseName(dest)}…` });
     try {
-      const out = await invoke<string>("save_photo", { path: current.path, settings, dest, format, writeLut });
+      const out = await invoke<string>("save_photo", { path: current.path, settings: eff(settings), dest, format, writeLut });
       setPhotos((prev) => prev.map((p) => (p.path === current.path ? { ...p, saved: out, error: undefined } : p)));
       setToast({ text: `Saved ${baseName(out)}`, reveal: out });
     } catch (e) {
@@ -322,7 +366,7 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
     setBatch({ done: 0, total: photos.length, running: true, dir, failed: 0 });
     try {
       await invoke("save_batch", {
-        req: { items: photos.map((p) => ({ path: p.path, settings: settingsMap[p.path] ?? lastUsed })), format, write_lut: writeLut, out_dir: dir },
+        req: { items: photos.map((p) => ({ path: p.path, settings: eff(settingsMap[p.path] ?? lastUsed) })), format, write_lut: writeLut, out_dir: dir },
       });
     } catch (e) {
       setToast({ text: String(e) });
@@ -555,6 +599,46 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
           </div>
           <p className="look-desc">{looks.find((l) => l.id === settings.look)?.description}</p>
           <Slider label="Strength" tip="s_strength" value={Math.round(settings.strength * 100)} min={0} max={200} suffix="%" onChange={(v) => update((s) => void (s.strength = v / 100))} />
+        </div>
+
+        {/* retouch */}
+        <div className="group retouch">
+          <div className="row">
+            <h2>Retouch</h2>
+            <label className="switch">
+              <Tip k="r_auto" align="right"><span>Auto retouch</span></Tip>
+              <input type="checkbox" role="switch" checked={settings.retouch.enabled} onChange={(e) => update((s) => void (s.retouch = { ...(s.retouch ?? freshRetouch()), enabled: e.target.checked }))} />
+              <span className="switch-ui" aria-hidden />
+            </label>
+          </div>
+          {settings.retouch.enabled && rModel && !rModel.ready && (
+            <div className="r-download">
+              <p>Retouch needs its face engine: a one-time {rModel.size_mb} MB download. After that it works offline.</p>
+              {rDl ? (
+                <div className="r-progress" role="progressbar" aria-valuenow={Math.round((rDl.got / Math.max(1, rDl.total)) * 100)}>
+                  <span style={{ width: `${Math.min(100, (rDl.got / Math.max(1, rDl.total)) * 100)}%` }} />
+                  <em>{Math.round(rDl.got / 1e6)} / {Math.round(rDl.total / 1e6)} MB</em>
+                </div>
+              ) : (
+                <button className="primary" onClick={downloadRetouch}>Download face engine</button>
+              )}
+              {rErr && <p className="r-err">{rErr}</p>}
+            </div>
+          )}
+          {settings.retouch.enabled && rModel?.ready && (
+            <>
+              <p className="r-status">
+                {!showing?.retouch ? "Finding faces…" : showing.retouch.faces === 0 ? "No faces found in this photo, so nothing was retouched." : `Retouching ${showing.retouch.faces} face${showing.retouch.faces > 1 ? "s" : ""}. Only skin is touched; eyes, lips, brows, hair and beards are protected.`}
+              </p>
+              <Amount label="Blemishes" tip="r_blemish" value={settings.retouch.blemishes} def={1} onChange={(v) => update((s) => void (s.retouch.blemishes = v))} />
+              <Amount label="Smooth skin" tip="r_smooth" value={settings.retouch.smooth} def={0.45} onChange={(v) => update((s) => void (s.retouch.smooth = v))} />
+              <Amount label="Even out redness" tip="r_even" value={settings.retouch.even} def={0.5} onChange={(v) => update((s) => void (s.retouch.even = v))} />
+              <Amount label="Calm shine" tip="r_shine" value={settings.retouch.shine} def={0.35} onChange={(v) => update((s) => void (s.retouch.shine = v))} />
+              <label className="check"><input type="checkbox" checked={settings.retouch.keep_moles} onChange={(e) => update((s) => void (s.retouch.keep_moles = e.target.checked))} /> <Tip k="r_moles">Keep moles &amp; beauty marks</Tip></label>
+              <label className="check"><input type="checkbox" checked={settings.retouch.keep_freckles} onChange={(e) => update((s) => void (s.retouch.keep_freckles = e.target.checked))} /> <Tip k="r_freckles">Keep freckles</Tip></label>
+              <p className="save-hint">Hold B to compare with the original.</p>
+            </>
+          )}
         </div>
 
         {/* adjustments */}

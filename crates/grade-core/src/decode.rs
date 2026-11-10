@@ -207,3 +207,51 @@ fn load_raw(path: &Path) -> Result<(DynamicImage, Orientation), Error> {
         .ok_or_else(|| Error::Raw("RAW buffer size mismatch".into()))?;
     Ok((DynamicImage::ImageRgb32F(buf), orientation))
 }
+
+/// Turn a photo by an EXIF orientation (or undo it with `inverse`).
+pub fn orient_photo(p: &Photo, o: Orientation, inverse: bool) -> Photo {
+    let o = if inverse {
+        match o {
+            Orientation::Rotate90 => Orientation::Rotate270,
+            Orientation::Rotate270 => Orientation::Rotate90,
+            other => other, // 180° and the mirrored ones undo themselves
+        }
+    } else {
+        o
+    };
+    if o == Orientation::NoTransforms {
+        return p.clone();
+    }
+    let raw: Vec<f32> = p.data.iter().flat_map(|c| c.iter().copied()).collect();
+    let mut img = DynamicImage::ImageRgb32F(Rgb32FImage::from_raw(p.width, p.height, raw).expect("size"));
+    img.apply_orientation(o);
+    let buf = img.into_rgb32f();
+    let (w, h) = buf.dimensions();
+    Photo { width: w, height: h, data: buf.into_raw().chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect(), from_raw: p.from_raw }
+}
+
+/// Box-average downscale so the long side is at most `max` (fast, for analysis).
+pub fn shrink_photo(p: &Photo, max: u32) -> Photo {
+    let f = ((p.width.max(p.height) as f32) / max as f32).ceil().max(1.0) as u32;
+    if f == 1 {
+        return p.clone();
+    }
+    let (w, h) = ((p.width / f).max(1), (p.height / f).max(1));
+    let mut data = Vec::with_capacity((w * h) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let mut acc = [0f32; 3];
+            for dy in 0..f {
+                for dx in 0..f {
+                    let px = p.data[((y * f + dy) * p.width + x * f + dx) as usize];
+                    for c in 0..3 {
+                        acc[c] += px[c];
+                    }
+                }
+            }
+            let n = (f * f) as f32;
+            data.push(acc.map(|v| v / n));
+        }
+    }
+    Photo { width: w, height: h, data, from_raw: p.from_raw }
+}

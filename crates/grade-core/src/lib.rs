@@ -14,6 +14,7 @@ pub mod grade;
 pub mod looks;
 pub mod lut;
 pub mod report;
+pub mod retouch;
 pub mod scopes;
 
 pub use adjust::{auto_sliders, Adjust, Settings};
@@ -21,6 +22,7 @@ pub use analyze::{analyze, Analysis, AutoParams};
 pub use encode::OutputFormat;
 pub use grade::Grade;
 pub use looks::{all_looks, find_look, Look, LookParams};
+pub use retouch::RetouchSettings;
 
 use std::path::{Path, PathBuf};
 
@@ -41,6 +43,8 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("could not read RAW file: {0}")]
     Raw(String),
+    #[error("{0}")]
+    Retouch(String),
     #[error("unknown look '{0}'")]
     UnknownLook(String),
     #[error("{0}")]
@@ -102,8 +106,21 @@ pub fn save_graded(input: &Path, output: &Path, settings: &Settings, format: Out
     }
     let small = decode::to_photo(upright, Some(ANALYSIS_SIZE), raw);
     let (analysis, grade) = grade_for(&small, settings)?;
+    let mut full = decode::to_photo(img, None, raw);
+    if settings.retouch.active() {
+        // Faces are found on the upright preview-size copy; retouch needs upright pixels too.
+        let faces = retouch::find_faces(&small).map_err(|e| Error::Retouch(e.to_string()))?;
+        if !faces.is_empty() {
+            if keep_exif {
+                let up = decode::orient_photo(&full, orientation, false);
+                let done = retouch::apply(&up, &faces, &settings.retouch);
+                full = decode::orient_photo(&done, orientation, true);
+            } else {
+                full = retouch::apply(&full, &faces, &settings.retouch);
+            }
+        }
+    }
     drop(small);
-    let full = decode::to_photo(img, None, raw);
     let graded = grade.apply(&full);
     drop(full);
 

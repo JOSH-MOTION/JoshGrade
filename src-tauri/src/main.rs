@@ -4,6 +4,7 @@
 use base64::Engine;
 use grade_core::scopes::{self, Scopes};
 use grade_core::report::{self, Line, Measure};
+use grade_core::retouch::{self, Face, RetouchSettings};
 use grade_core::{decode, encode, lut, Adjust, Analysis, Grade, OutputFormat, Photo, Settings};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -20,6 +21,47 @@ struct Entry {
     before_url: String,
     before_scopes: Scopes,
     before_measure: Measure,
+    /// Faces found for retouching (found once, the first time retouch is used).
+    faces: Mutex<Option<Arc<Vec<Face>>>>,
+    /// The last retouched copy, so moving a grade slider doesn't redo the retouch.
+    retouched: Mutex<Option<(RetouchSettings, Arc<Photo>)>>,
+}
+
+impl Entry {
+    /// The photo to grade: the original, or the retouched copy when retouch is on.
+    fn base(&self, r: &RetouchSettings) -> Result<(Option<Arc<Photo>>, Option<RetouchInfo>), String> {
+        if !r.active() {
+            return Ok((None, None));
+        }
+        if let Some((rs, p)) = &*self.retouched.lock().unwrap() {
+            if rs == r {
+                let n = self.faces.lock().unwrap().as_ref().map(|f| f.len()).unwrap_or(0);
+                return Ok((Some(p.clone()), Some(RetouchInfo { faces: n })));
+            }
+        }
+        let faces = {
+            let mut g = self.faces.lock().unwrap();
+            match &*g {
+                Some(f) => f.clone(),
+                None => {
+                    let f = Arc::new(retouch::find_faces(&self.photo).map_err(|e| match e {
+                        retouch::RetouchError::ModelMissing => "retouch-model-missing".to_string(),
+                        e => e.to_string(),
+                    })?);
+                    *g = Some(f.clone());
+                    f
+                }
+            }
+        };
+        let p = Arc::new(retouch::apply(&self.photo, &faces, r));
+        *self.retouched.lock().unwrap() = Some((*r, p.clone()));
+        Ok((Some(p), Some(RetouchInfo { faces: faces.len() })))
+    }
+}
+
+#[derive(Serialize, Clone)]
+struct RetouchInfo {
+    faces: usize,
 }
 
 #[derive(Default)]
@@ -56,6 +98,8 @@ struct PreviewResult {
     auto_adjust: Adjust,
     scopes_before: Scopes,
     scopes_after: Scopes,
+    /// Set when retouch is on: how many faces were retouched.
+    retouch: Option<RetouchInfo>,
 }
 
 #[derive(Deserialize)]
@@ -102,7 +146,7 @@ fn cached(state: &AppState, path: &str) -> Result<Arc<Entry>, String> {
     let before_url = jpeg_url(&photo, 88)?;
     let before_scopes = scopes::compute(&photo);
     let before_measure = report::measure(&photo);
-    let entry = Arc::new(Entry { photo, analysis, before_url, before_scopes, before_measure });
+    let entry = Arc::new(Entry { photo, analysis, before_url, before_scopes, before_measure, faces: Mutex::new(None), retouched: Mutex::new(None) });
     let mut c = state.cache.lock().unwrap();
     if c.len() > 16 {
         c.clear(); // keep memory bounded
@@ -150,7 +194,8 @@ async fn preview(state: St<'_>, path: String, settings: Settings, with_before: b
     blocking(move || {
         let e = cached(&st, &path)?;
         let grade = grade_core::grade_with(&e.analysis, &settings).map_err(|e| e.to_string())?;
-        let after = grade.apply(&e.photo);
+        let (base, retouch) = e.base(&settings.retouch)?;
+        let after = grade.apply(base.as_deref().unwrap_or(&e.photo));
         let overlay = if clipping { Some(png_url(&scopes::clipping_overlay(&after))?) } else { None };
         Ok(PreviewResult {
             before: with_before.then(|| e.before_url.clone()),
@@ -162,6 +207,7 @@ async fn preview(state: St<'_>, path: String, settings: Settings, with_before: b
             auto_adjust: if settings.auto { grade_core::auto_sliders(&e.analysis.params) } else { Adjust::default() },
             scopes_before: e.before_scopes.clone(),
             scopes_after: scopes::compute(&after),
+            retouch,
         })
     })
     .await
@@ -284,10 +330,78 @@ async fn save_batch(app: tauri::AppHandle, state: St<'_>, req: BatchRequest) -> 
     .await
 }
 
+#[derive(Serialize)]
+struct RetouchModel {
+    ready: bool,
+    size_mb: u32,
+}
+
+#[tauri::command]
+fn retouch_model() -> RetouchModel {
+    RetouchModel { ready: retouch::model_ready(), size_mb: retouch::PARSER_MB }
+}
+
+#[derive(Serialize, Clone)]
+struct DlProgress {
+    got: u64,
+    total: u64,
+}
+
+/// Download the face map model once (about 53 MB). Retouch works offline after that.
+#[tauri::command]
+async fn retouch_download(app: tauri::AppHandle) -> Result<(), String> {
+    use std::io::{Read, Write};
+    blocking(move || {
+        let dest = retouch::parser_path();
+        if dest.exists() {
+            return Ok(());
+        }
+        let dir = dest.parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let resp = ureq::get(retouch::PARSER_URL)
+            .call()
+            .map_err(|e| format!("Couldn't download the retouch engine ({e}). Check your internet connection and try again."))?;
+        let total: u64 = resp.header("Content-Length").and_then(|v| v.parse().ok()).unwrap_or(retouch::PARSER_MB as u64 * 1_000_000);
+        let part = dir.join("face_parsing.part");
+        let mut f = std::fs::File::create(&part).map_err(|e| e.to_string())?;
+        let mut r = resp.into_reader();
+        let mut buf = vec![0u8; 1 << 16];
+        let (mut got, mut last) = (0u64, 0u64);
+        loop {
+            let n = r.read(&mut buf).map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            f.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+            got += n as u64;
+            if got - last > 500_000 {
+                last = got;
+                let _ = app.emit("retouch-download", DlProgress { got, total });
+            }
+        }
+        drop(f);
+        if got < total * 9 / 10 {
+            let _ = std::fs::remove_file(&part);
+            return Err("The download was cut off. Try again.".into());
+        }
+        std::fs::rename(&part, &dest).map_err(|e| e.to_string())?;
+        let _ = app.emit("retouch-download", DlProgress { got, total });
+        Ok(())
+    })
+    .await
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            use tauri::Manager;
+            if let Ok(d) = app.path().app_data_dir() {
+                retouch::set_model_dir(d.join("face-models"));
+            }
+            Ok(())
+        })
         .manage(Arc::new(AppState::default()))
         .manage(Arc::new(video::VideoState::default()))
         .invoke_handler(tauri::generate_handler![
@@ -300,6 +414,8 @@ fn main() {
             save_photo,
             save_batch,
             cancel_batch,
+            retouch_model,
+            retouch_download,
             video::media_collect,
             video::media_cancel,
             video::sync_run,

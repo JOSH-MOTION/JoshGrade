@@ -98,6 +98,16 @@ fi
 command -v cmake >/dev/null 2>&1 || fail "Couldn't set up cmake. Check your internet connection and run the command again."
 
 # 6. Build
+# Face engine for Auto retouch (53 MB, once). The app can also download it later.
+FACE_DIR="$HOME/Library/Application Support/app.joshgrade.desktop/face-models"
+if [ ! -f "$FACE_DIR/face_parsing_resnet18.onnx" ]; then
+  echo "Getting the face engine for Auto retouch (53 MB)..."
+  mkdir -p "$FACE_DIR"
+  curl -fsSL "https://huggingface.co/yakhyo/uniface-weights/resolve/main/parsing_resnet18.onnx" -o "$FACE_DIR/face_parsing.part" \
+    && mv "$FACE_DIR/face_parsing.part" "$FACE_DIR/face_parsing_resnet18.onnx" \
+    || { rm -f "$FACE_DIR/face_parsing.part"; echo "(Couldn't get it now - the app will offer to download it.)"; }
+fi
+
 say "Step 6/6: Building JoshGrade (the long part - lots of text will scroll by, that's normal)..."
 npm ci --no-audit --no-fund
 # Build the caption engine for a common processor baseline (not just this Mac's chip),

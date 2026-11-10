@@ -38,6 +38,18 @@ The **Check** panel measures the photo, so you can see whether it's right instea
 
 The **Report** at the bottom measures the original and the current grade the same way (exposure, blown highlights, crushed shadows, colour cast, contrast, colour intensity, colours losing detail, skin) and updates live as you change things.
 
+## Auto retouch (portraits)
+
+Turn on **Retouch › Auto retouch** and JoshGrade finds every face and retouches the skin the way a careful retoucher would:
+
+- **Blemishes**: acne, spots and marks are healed with the colour of the skin around them plus real pore texture from nearby skin, so nothing looks painted over.
+- **Smooth skin**: frequency separation. Pores and fine texture always stay; only blotchiness is reduced, and strong features (smile lines, the shape of the face) pass through. It adapts to each face, so smooth skin is barely touched.
+- **Even out redness**: red patches go back to the person's *own* skin colour. It never lightens or greys skin.
+- **Calm shine**: tones down oily highlights.
+- **Protected**: eyes, lashes, brows, lips, hair, beards and stubble, nostrils. Moles, beauty marks and freckles are kept unless you untick them.
+
+Everything is measured relative to the face size and in ratios of brightness, so it works the same on a headshot or a full-length shot, and on every skin tone. The face engine (53 MB) downloads once, then everything runs offline on your Mac.
+
 ## Fine-tuning
 
 With **Auto grade** on, JoshGrade sets the sliders for you: the number shows what it chose (marked *auto*, with a small blue tick under the slider). Move a slider to adjust from there; double-click to go back to the auto value. Turn **Auto grade** off to see the photo without the automatic correction.
@@ -169,6 +181,12 @@ src                 desktop app interface (React + TypeScript)
 Tauri uses the Mac's built-in WebKit instead of bundling Chrome, so the app is a few MB rather than 100+ MB.
 
 Because every correction is a single per-pixel transform, the on-screen preview, the saved photo and the exported LUT always match.
+
+## Credits
+
+- Face finder: [YuNet](https://github.com/opencv/opencv_zoo) (MIT), built in.
+- Face map: BiSeNet face parsing ([face-parsing.PyTorch](https://github.com/zllrunning/face-parsing.PyTorch), MIT; ONNX from [uniface](https://huggingface.co/yakhyo/uniface-weights)), downloaded on first use. It was trained on CelebAMask-HQ, which is for non-commercial use. Check this before selling JoshGrade.
+- Models run with [tract](https://github.com/sonos/tract), pure Rust.
 
 ## Limits
 
