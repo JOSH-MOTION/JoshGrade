@@ -20,11 +20,21 @@ export const bandColor = (hue: number, l = 56) => `hsl(${hue}, 82%, ${l}%)`;
 /** Fit the canvas to its CSS size at device resolution. */
 function useCanvas(draw: (ctx: CanvasRenderingContext2D, w: number, h: number) => void, deps: unknown[]) {
   const ref = useRef<HTMLCanvasElement>(null);
+  const [tick, setTick] = useState(0);
+  // redraw when the canvas changes size (e.g. its panel is shown again or resized)
+  useEffect(() => {
+    const c = ref.current;
+    if (!c) return;
+    const ro = new ResizeObserver(() => setTick((t) => t + 1));
+    ro.observe(c);
+    return () => ro.disconnect();
+  }, []);
   useEffect(() => {
     const c = ref.current;
     if (!c) return;
     const dpr = window.devicePixelRatio || 1;
     const { width, height } = c.getBoundingClientRect();
+    if (width < 2 || height < 2) return;
     c.width = Math.round(width * dpr);
     c.height = Math.round(height * dpr);
     const ctx = c.getContext("2d")!;
@@ -32,7 +42,7 @@ function useCanvas(draw: (ctx: CanvasRenderingContext2D, w: number, h: number) =
     ctx.clearRect(0, 0, width, height);
     draw(ctx, width, height);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, deps);
+  }, [...deps, tick]);
   return ref;
 }
 
@@ -151,6 +161,7 @@ export function ColorWheel({ data, selected, onSelect }: { data: ScopeData; sele
       const cx = w / 2;
       const cy = h / 2;
       const R = size / 2 - 10;
+      if (R < 12) return; // hidden or too small to draw
       // hue ring
       for (let a = 0; a < 360; a += 2) {
         ctx.beginPath();

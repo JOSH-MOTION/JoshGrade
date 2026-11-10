@@ -330,6 +330,51 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
   const setDet = (key: keyof Detail) => (v: number) => update((s) => void (s.detail[key] = v));
   const setBandAdj = (key: "hue" | "sat" | "lum") => (v: number) => update((s) => void (s.adjust[key][band] = v));
 
+  // ---------- layout: hide / resize / swap the side panels, fold groups (remembered)
+  type Layout = { strip: boolean; panel: boolean; panelW: number; left: boolean; folded: string[] };
+  const [layout, setLayout] = useState<Layout>(() => {
+    const d: Layout = { strip: true, panel: true, panelW: 348, left: false, folded: [] };
+    try {
+      return { ...d, ...JSON.parse(localStorage.getItem("joshgrade.layout") ?? "{}") };
+    } catch {
+      return d;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("joshgrade.layout", JSON.stringify(layout));
+    } catch {
+      /* not critical */
+    }
+  }, [layout]);
+  const g = (cls: string, id: string) => `group ${cls}${layout.folded.includes(id) ? " folded" : ""}`;
+  const fold = (id: string) => setLayout((l) => ({ ...l, folded: l.folded.includes(id) ? l.folded.filter((x) => x !== id) : [...l.folded, id] }));
+  const onPanelClick = (e: React.MouseEvent) => {
+    const t = e.target as HTMLElement;
+    if (t.closest("button, input, label, a, select, .tip-pop")) return;
+    const head = t.closest(".group[data-g] > :first-child");
+    const grp = head?.parentElement;
+    if (grp?.dataset.g) fold(grp.dataset.g);
+  };
+  const startResize = (e: React.PointerEvent) => {
+    e.preventDefault();
+    const x0 = e.clientX;
+    const w0 = layout.panelW;
+    const move = (ev: PointerEvent) => setLayout((l) => ({ ...l, panelW: Math.max(280, Math.min(620, w0 + (layout.left ? ev.clientX - x0 : x0 - ev.clientX))) }));
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+  const cols = [layout.strip ? "184px" : "0px", "minmax(0, 1fr)", layout.panel ? `${layout.panelW}px` : "0px"];
+  const gridStyle: React.CSSProperties = layout.left
+    ? { gridTemplateColumns: [cols[2], cols[1], cols[0]].join(" "), gridTemplateAreas: '"top top top" "panel stage strip"' }
+    : { gridTemplateColumns: cols.join(" ") };
+  const layoutKeys = useRef({ tab: () => {} });
+  layoutKeys.current.tab = () => setLayout((l) => (l.strip || l.panel ? { ...l, strip: false, panel: false } : { ...l, strip: true, panel: true }));
+
   // ---------- masks (local adjustments)
   const [maskSel, setMaskSel] = useState<number | null>(null);
   const [maskOverlay, setMaskOverlay] = useState(true);
@@ -515,6 +560,10 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
       if (e.key.toLowerCase() === "j" && !e.repeat) setClipping((c) => !c);
       if (e.key.toLowerCase() === "c" && !e.repeat) setCropMode((c) => !c);
       if (e.key.toLowerCase() === "z" && !e.repeat) zoomTo("100");
+      if (e.key === "Tab" && !e.shiftKey && (e.target as HTMLElement) === document.body) {
+        e.preventDefault();
+        layoutKeys.current.tab();
+      }
       if (e.key.toLowerCase() === "o" && !e.repeat) setMaskOverlay((o) => !o);
       if (e.key === "[" ) setBrush((b) => ({ ...b, size: Math.max(0.004, b.size / 1.2) }));
       if (e.key === "]") setBrush((b) => ({ ...b, size: Math.min(0.3, b.size * 1.2) }));
@@ -624,11 +673,22 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
   const auto: Adjust = showing?.auto_adjust ?? freshAdjust();
 
   return (
-    <div className={`app ${dragOver ? "drag-over" : ""}`} style={active ? undefined : { display: "none" }}>
+    <div className={`app ${dragOver ? "drag-over" : ""} ${layout.left ? "panel-left" : ""} ${layout.strip ? "" : "no-strip"} ${layout.panel ? "" : "no-panel"}`} style={active ? gridStyle : { display: "none" }}>
       <header className="titlebar" data-tauri-drag-region>
         <span className="brand" data-tauri-drag-region>JoshGrade</span>
         {modeSwitch}
         <div className="title-actions">
+          <span className="layout-btns" role="group" aria-label="Panels">
+            <button className={`icon-btn ${layout.strip ? "on" : ""}`} onClick={() => setLayout((l) => ({ ...l, strip: !l.strip }))} aria-pressed={layout.strip} title="Show / hide the photo list">
+              <svg width="18" height="14" viewBox="0 0 18 14" aria-hidden><rect x="0.5" y="0.5" width="17" height="13" rx="2" fill="none" stroke="currentColor" /><rect x={layout.left ? 12 : 1} y="1" width="5" height="12" rx="1" fill="currentColor" opacity=".8" /></svg>
+            </button>
+            <button className={`icon-btn ${layout.panel ? "on" : ""}`} onClick={() => setLayout((l) => ({ ...l, panel: !l.panel }))} aria-pressed={layout.panel} title="Show / hide the controls (Tab hides both panels)">
+              <svg width="18" height="14" viewBox="0 0 18 14" aria-hidden><rect x="0.5" y="0.5" width="17" height="13" rx="2" fill="none" stroke="currentColor" /><rect x={layout.left ? 1 : 11} y="1" width="6" height="12" rx="1" fill="currentColor" opacity=".8" /></svg>
+            </button>
+            <button className="icon-btn" onClick={() => setLayout((l) => ({ ...l, left: !l.left }))} title={layout.left ? "Move the controls to the right" : "Move the controls to the left"}>
+              <svg width="18" height="14" viewBox="0 0 18 14" aria-hidden><path d="M3 5h12l-3-3M15 9H3l3 3" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
+            </button>
+          </span>
           <button onClick={pickFiles}>Add photos</button>
           <button onClick={pickFolder}>Add folder</button>
         </div>
@@ -770,7 +830,13 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
       </main>
 
       {/* -------- controls */}
-      <section className="panel" aria-label="Grade settings">
+      {layout.panel && (
+        <div className="panel-resize" style={layout.left ? { left: layout.panelW - 3 } : { right: layout.panelW - 3 }} onPointerDown={startResize} onDoubleClick={() => setLayout((l) => ({ ...l, panelW: 348 }))} title="Drag to resize. Double-click for the normal width." aria-hidden />
+      )}
+      <section className="panel" aria-label="Grade settings" onClick={onPanelClick}>
+        {layout.folded.length > 0 && (
+          <button className="link unfold" onClick={() => setLayout((l) => ({ ...l, folded: [] }))}>Open all sections</button>
+        )}
         <div className="group workflow">
           <div className="wf-row">
             <button className="chip" onClick={() => undo()} disabled={!canUndo} title="Undo (⌘Z)">↶ Undo</button>
@@ -792,7 +858,7 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
         </div>
 
         {/* scopes */}
-        <div className="group scopes">
+        <div className={g("scopes", "scopes")} data-g="scopes">
           <div className="row">
             <h2><Tip k="histogram">Check</Tip></h2>
             <div className="seg mini" role="radiogroup" aria-label="Show measurements for">
@@ -869,7 +935,7 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
         )}
 
         {/* looks */}
-        <div className="group">
+        <div className={g("", "look")} data-g="look">
           <h2>Look</h2>
           <div className="looks">
             {looks.map((l) => (
@@ -897,7 +963,7 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
         </div>
 
         {/* retouch */}
-        <div className="group retouch">
+        <div className={g("retouch", "retouch")} data-g="retouch">
           <div className="row">
             <h2>Retouch</h2>
             <label className="switch">
@@ -937,7 +1003,7 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
         </div>
 
         {/* masks */}
-        <div className="group masks">
+        <div className={g("masks", "masks")} data-g="masks">
           <div className="row">
             <h2><Tip k="m_masks">Masks</Tip></h2>
             {selMask && <button className="link" onClick={() => setMaskSel(null)}>Done</button>}
@@ -1023,7 +1089,7 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
         </div>
 
         {/* adjustments */}
-        <div className="group">
+        <div className={g("", "light")} data-g="light">
           <div className="row">
             <h2>Light</h2>
             <label className="switch">
@@ -1050,14 +1116,14 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
           {adjusted && <button className="link reset-link" onClick={resetAdjust}>Back to auto (undo my changes)</button>}
         </div>
 
-        <div className="group">
+        <div className={g("", "curve")} data-g="curve">
           <div className="row">
             <h2><Tip k="t_curve">Tone curve</Tip></h2>
           </div>
           <CurveEditor curves={settings.curves} onChange={(c) => update((s) => void (s.curves = c))} histogram={showing?.scopes_after.hist_l} />
         </div>
 
-        <div className="group">
+        <div className={g("", "mix")} data-g="mix">
           <h2>Colour mix</h2>
           <div className="swatches" role="radiogroup" aria-label="Colour">
             {BANDS.map((b, i) => (
@@ -1083,7 +1149,7 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
         </div>
 
         {showing && (
-          <div className="group report">
+          <div className={g("report", "report")} data-g="report">
             <h2>Report: original → now</h2>
             <p className="report-hint">Measured from your photo with the current settings. It updates every time you change something.</p>
             <ul className="report-list">
@@ -1105,7 +1171,7 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
         )}
 
         {/* detail + effects */}
-        <div className="group">
+        <div className={g("", "detail")} data-g="detail">
           <h2>Detail</h2>
           <h2 className="sub">Sharpening</h2>
           <Slider label="Amount" tip="d_sharpen" value={settings.detail.sharpen} min={0} max={150} def={0} onChange={setDet("sharpen")} />
@@ -1117,7 +1183,7 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
           <p className="save-hint">Zoom to 100% (Z) to judge sharpening and noise.</p>
         </div>
 
-        <div className="group">
+        <div className={g("", "effects")} data-g="effects">
           <h2>Effects</h2>
           <h2 className="sub">Vignette</h2>
           <Slider label="Amount" tip="d_vignette" value={settings.detail.vignette} onChange={setDet("vignette")} />
@@ -1129,7 +1195,7 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
         </div>
 
         {/* saving */}
-        <div className="group export">
+        <div className={g("export", "export")} data-g="export">
           <h2>Save</h2>
           <p className="save-hint">Nothing is saved until you click a button below. Your originals are never changed.</p>
           <div className="seg" role="radiogroup" aria-label="File type">
