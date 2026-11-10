@@ -89,9 +89,50 @@ fn copy_jpeg_metadata(src: &Path, encoded: &[u8]) -> Result<Vec<u8>, Error> {
     use img_parts::{Bytes, ImageEXIF, ImageICC};
     let src = Jpeg::from_bytes(Bytes::from(std::fs::read(src)?)).map_err(|e| Error::Other(e.to_string()))?;
     let mut out = Jpeg::from_bytes(Bytes::copy_from_slice(encoded)).map_err(|e| Error::Other(e.to_string()))?;
-    out.set_exif(src.exif());
+    // Our pixels are always upright, so the orientation flag must say "as stored".
+    out.set_exif(src.exif().map(|e| {
+        let mut v = e.to_vec();
+        reset_orientation(&mut v);
+        Bytes::from(v)
+    }));
     out.set_icc_profile(src.icc_profile());
     let mut v = Vec::new();
     out.encoder().write_to(&mut v)?;
     Ok(v)
+}
+
+/// Set the EXIF orientation tag (0x0112) in IFD0 to 1 ("normal"), in place.
+pub fn reset_orientation(exif: &mut [u8]) {
+    let base = if exif.starts_with(b"Exif\0\0") { 6 } else { 0 };
+    let t = &exif[base..];
+    if t.len() < 8 {
+        return;
+    }
+    let le = &t[..2] == b"II";
+    let rd16 = |b: &[u8], o: usize| -> usize { if le { u16::from_le_bytes([b[o], b[o + 1]]) as usize } else { u16::from_be_bytes([b[o], b[o + 1]]) as usize } };
+    let rd32 = |b: &[u8], o: usize| -> usize {
+        if le { u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]) as usize } else { u32::from_be_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]) as usize }
+    };
+    let ifd = rd32(t, 4);
+    if ifd + 2 > t.len() {
+        return;
+    }
+    let n = rd16(t, ifd);
+    for i in 0..n {
+        let e = ifd + 2 + i * 12;
+        if e + 12 > t.len() {
+            return;
+        }
+        if rd16(t, e) == 0x0112 {
+            let v = base + e + 8;
+            if le {
+                exif[v] = 1;
+                exif[v + 1] = 0;
+            } else {
+                exif[v] = 0;
+                exif[v + 1] = 1;
+            }
+            return;
+        }
+    }
 }

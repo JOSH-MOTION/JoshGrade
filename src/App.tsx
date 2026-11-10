@@ -6,6 +6,7 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { ColorWheel, Histogram, ScopeData, bandColor } from "./Scopes";
 import { Tip } from "./Tip";
+import { Crop, cropActive, cropToAspect, fitCrop, freshCrop, Viewer } from "./Viewer";
 
 type Look = { id: string; name: string; description: string };
 type Adjust = {
@@ -14,12 +15,12 @@ type Adjust = {
   hue: number[]; sat: number[]; lum: number[];
 };
 type Retouch = { enabled: boolean; blemishes: number; smooth: number; even: number; shine: number; keep_moles: boolean; keep_freckles: boolean };
-type Settings = { auto: boolean; look: string; strength: number; adjust: Adjust; retouch: Retouch };
+type Settings = { auto: boolean; look: string; strength: number; adjust: Adjust; retouch: Retouch; crop: Crop };
 type ReportLine = { key: string; label: string; before: string; after: string; verdict: string; status: "good" | "warn" | "info" };
 type Photo = { path: string; name: string; thumb?: string; saved?: string; error?: string };
 type Preview = {
   path: string; after: string; overlay?: string | null; width: number; height: number;
-  report: ReportLine[]; auto_adjust: Adjust; scopes_before: ScopeData; scopes_after: ScopeData;
+  report: ReportLine[]; auto_adjust: Adjust; scopes_before: ScopeData; scopes_after: ScopeData; full_width: number; full_height: number;
   retouch?: { faces: number } | null;
 };
 type Progress = { index: number; total: number; file: string; ok: boolean; output?: string; error?: string };
@@ -35,7 +36,7 @@ const freshAdjust = (): Adjust => ({
   hue: ZERO8(), sat: ZERO8(), lum: ZERO8(),
 });
 const freshRetouch = (): Retouch => ({ enabled: false, blemishes: 1, smooth: 0.45, even: 0.5, shine: 0.35, keep_moles: true, keep_freckles: true });
-const freshSettings = (): Settings => ({ auto: true, look: "natural", strength: 1, adjust: freshAdjust(), retouch: freshRetouch() });
+const freshSettings = (): Settings => ({ auto: true, look: "natural", strength: 1, adjust: freshAdjust(), retouch: freshRetouch(), crop: freshCrop() });
 const clone = (s: Settings): Settings => JSON.parse(JSON.stringify(s));
 
 const EXTENSIONS = [
@@ -48,6 +49,14 @@ const baseName = (p: string) => p.split(/[\\/]/).pop() ?? p;
 const dirName = (p: string) => p.slice(0, Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\")));
 const stem = (p: string) => baseName(p).replace(/\.[^.]+$/, "");
 const isRaw = (p: string) => /\.(cr2|cr3|crw|nef|nrw|arw|srf|sr2|raf|rw2|rwl|orf|pef|dng|srw|3fr|fff|iiq|mos|erf|kdc|dcr|mrw|x3f)$/i.test(p);
+
+const ASPECTS: [string, string][] = [["free", "Free"], ["orig", "Original"], ["1:1", "1:1"], ["4:5", "4:5"], ["5:4", "5:4"], ["2:3", "2:3"], ["3:2", "3:2"], ["16:9", "16:9"], ["9:16", "9:16"]];
+function aspectValue(id: string, p: { width: number; height: number; full_width?: number; full_height?: number }): number | null {
+  if (id === "free") return null;
+  if (id === "orig") return p.width / p.height;
+  const [a, b] = id.split(":").map(Number);
+  return a / b;
+}
 
 /** 0–100% slider for retouch amounts (double-click = default). */
 function Amount({ label, tip, value, def, onChange }: { label: string; tip: string; value: number; def: number; onChange: (v: number) => void }) {
@@ -69,15 +78,15 @@ function Amount({ label, tip, value, def, onChange }: { label: string; tip: stri
 
 /** A slider that shows auto + your change. `auto` is what JoshGrade chose; moving the slider
  *  stores only your change on top, so the auto grade is never lost. */
-function Slider({ label, tip, value, auto = 0, onChange, min = -100, max = 100, track, suffix = "" }: {
+function Slider({ label, tip, value, auto = 0, onChange, min = -100, max = 100, track, suffix = "", step = 1 }: {
   label: string; tip?: string; value: number; auto?: number; onChange: (offset: number) => void;
-  min?: number; max?: number; track?: string; suffix?: string;
+  min?: number; max?: number; track?: string; suffix?: string; step?: number;
 }) {
   const id = `s-${label.replace(/\W/g, "")}-${tip ?? ""}`;
   const shown = Math.max(min, Math.min(max, auto + value));
   const reset = () => onChange(min < 0 ? 0 : 100 - auto);
   const autoPos = ((Math.max(min, Math.min(max, auto)) - min) / (max - min)) * 100;
-  const fmt = (v: number) => `${v > 0 && min < 0 ? "+" : ""}${Math.round(v)}${suffix}`;
+  const fmt = (v: number) => `${v > 0 && min < 0 ? "+" : ""}${step < 1 ? v.toFixed(1) : Math.round(v)}${suffix}`;
   return (
     <div className="slider">
       <div className="slider-head">
@@ -96,7 +105,7 @@ function Slider({ label, tip, value, auto = 0, onChange, min = -100, max = 100, 
           type="range"
           min={min}
           max={max}
-          step={1}
+          step={step}
           value={shown}
           onChange={(e) => onChange(+e.target.value - auto)}
           onDoubleClick={reset}
@@ -123,6 +132,11 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
   const [error, setError] = useState<string | null>(null);
   const [lookThumbs, setLookThumbs] = useState<Record<string, string>>({});
   const [split, setSplit] = useState(50);
+  const [cropMode, setCropMode] = useState(false);
+  const [aspect, setAspect] = useState<string>("free");
+  const [zoomCmd, setZoomCmd] = useState<{ n: number; to: "fit" | "100" | "in" | "out" } | null>(null);
+  const [zoomInfo, setZoomInfo] = useState({ z: 1, z100: 1 });
+  const zoomTo = (to: "fit" | "100" | "in" | "out") => setZoomCmd((c) => ({ n: (c?.n ?? 0) + 1, to }));
   const [showBefore, setShowBefore] = useState(false);
   const [clipping, setClipping] = useState(false);
   const [scopeView, setScopeView] = useState<"after" | "before">("after");
@@ -146,7 +160,7 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
 
   const current = photos[selected] as Photo | undefined;
   const stored: Settings = (current && settingsMap[current.path]) || lastUsed;
-  const settings: Settings = stored.retouch ? stored : { ...stored, retouch: freshRetouch() };
+  const settings: Settings = { ...stored, retouch: stored.retouch ?? freshRetouch(), crop: stored.crop ?? freshCrop() };
   // Retouch engine: the face map model is downloaded once, then everything runs offline.
   const [rModel, setRModel] = useState<{ ready: boolean; size_mb: number } | null>(null);
   const [rDl, setRDl] = useState<{ got: number; total: number } | null>(null);
@@ -261,7 +275,7 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
 
   // ---------- live preview
   const reqId = useRef(0);
-  const settingsKey = JSON.stringify(settings);
+  const settingsKey = JSON.stringify({ ...settings, crop: { r: settings.crop.rot90, f: settings.crop.flip_h } });
   useEffect(() => {
     if (!current) {
       setPreview(null);
@@ -316,6 +330,10 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
       if (e.key === "ArrowUp") setSelected((s) => Math.max(s - 1, 0));
       if (e.key.toLowerCase() === "b" && !e.repeat) setShowBefore(true);
       if (e.key.toLowerCase() === "j" && !e.repeat) setClipping((c) => !c);
+      if (e.key.toLowerCase() === "c" && !e.repeat) setCropMode((c) => !c);
+      if (e.key.toLowerCase() === "z" && !e.repeat) zoomTo("100");
+      if (e.key === "Escape") setCropMode(false);
+      if (e.key === "Enter" && (e.target as HTMLElement).tagName !== "BUTTON") setCropMode(false);
     };
     const up = (e: KeyboardEvent) => e.key.toLowerCase() === "b" && setShowBefore(false);
     window.addEventListener("keydown", down);
@@ -411,23 +429,6 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
 
   // ---------- compare frame sizing + divider drag
   const stageRef = useRef<HTMLDivElement>(null);
-  const [box, setBox] = useState({ w: 0, h: 0 });
-  useEffect(() => {
-    const el = stageRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver(([e]) => setBox({ w: e.contentRect.width, h: e.contentRect.height }));
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [!!current]);
-  const fit = (w: number, h: number) => {
-    const s = Math.min(box.w / w, box.h / h);
-    return s > 0 && isFinite(s) ? { width: Math.floor(w * s), height: Math.floor(h * s) } : { width: 0, height: 0 };
-  };
-  const dragSplit = (clientX: number) => {
-    const r = stageRef.current?.querySelector(".frame")?.getBoundingClientRect();
-    if (r) setSplit(Math.max(0, Math.min(100, ((clientX - r.left) / r.width) * 100)));
-  };
-
   const auto: Adjust = showing?.auto_adjust ?? freshAdjust();
 
   return (
@@ -479,46 +480,30 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
           </div>
         ) : (
           <>
-            <div
-              className="compare"
-              ref={stageRef}
-              onPointerDown={(e) => {
-                if (!showing) return;
-                (e.target as HTMLElement).setPointerCapture(e.pointerId);
-                dragSplit(e.clientX);
-              }}
-              onPointerMove={(e) => e.buttons === 1 && dragSplit(e.clientX)}
-            >
+            <div className="compare" ref={stageRef}>
               {showing && beforeUrl ? (
-                <div className="frame" style={fit(showing.width, showing.height)}>
-                  <img className="layer" src={showing.after} alt={`${current.name} graded`} draggable={false} />
-                  {clipping && showing.overlay && <img className="layer overlay" src={showing.overlay} alt="" draggable={false} />}
-                  <img
-                    className="layer before"
-                    src={beforeUrl}
-                    alt={`${current.name} original`}
-                    draggable={false}
-                    style={{ clipPath: showBefore ? "none" : `inset(0 ${100 - split}% 0 0)` }}
-                  />
-                  {!showBefore && (
-                    <div
-                      className="divider"
-                      style={{ left: `${split}%` }}
-                      role="slider"
-                      tabIndex={0}
-                      aria-label="Before and after divider"
-                      aria-valuenow={Math.round(split)}
-                      onKeyDown={(e) => {
-                        if (e.key === "ArrowLeft") setSplit((s) => Math.max(0, s - 5));
-                        if (e.key === "ArrowRight") setSplit((s) => Math.min(100, s + 5));
-                      }}
-                    >
-                      <span className="knob" />
-                    </div>
-                  )}
-                  <span className="tag tag-l">Original</span>
-                  {!showBefore && <span className="tag tag-r">{settings.auto ? "Auto + " : ""}{lookName}{adjusted ? " + your edits" : ""}</span>}
-                </div>
+                <Viewer
+                  after={showing.after}
+                  before={beforeUrl}
+                  overlay={clipping ? showing.overlay : null}
+                  W={showing.width}
+                  H={showing.height}
+                  fullW={showing.full_width || showing.width}
+                  fullH={showing.full_height || showing.height}
+                  crop={settings.crop}
+                  cropMode={cropMode}
+                  aspect={aspectValue(aspect, showing)}
+                  onCrop={(c) => update((s) => void (s.crop = c))}
+                  split={split}
+                  setSplit={setSplit}
+                  showBefore={showBefore}
+                  tagL="Original"
+                  tagR={`${settings.auto ? "Auto + " : ""}${lookName}${adjusted ? " + your edits" : ""}`}
+                  fetchTile={(region, maxPx, before) => invoke<string>("preview_region", { path: current.path, settings: eff(settings), region, maxPx, before })}
+                  tileKey={`${current.path}|${settingsKey}`}
+                  zoomCmd={zoomCmd}
+                  onZoom={(z, z100) => setZoomInfo({ z, z100 })}
+                />
               ) : (
                 <div className="developing">
                   {error ? (
@@ -538,7 +523,23 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
             </div>
             <div className="stage-foot">
               <span className="foot-name">{current.name}</span>
-              <span className="hint">Drag across the photo to compare. Hold B for the original, press J for clipping.</span>
+              {cropMode ? (
+                <span className="hint">Drag the corners or edges to crop, drag inside to move. Enter or C when done.</span>
+              ) : (
+                <span className="hint">{zoomInfo.z > 1.01 ? "Drag or scroll to move around. Double-click to fit." : "Drag across the photo to compare. Double-click or Z to zoom to 100%. Hold B for the original."}</span>
+              )}
+              {!cropMode && (
+                <span className="zoom-ctl" role="group" aria-label="Zoom">
+                  <button className="chip" onClick={() => zoomTo("out")} aria-label="Zoom out" disabled={zoomInfo.z <= 1.001}>−</button>
+                  <button className="chip zoom-val" onClick={() => zoomTo(zoomInfo.z > 1.01 ? "fit" : "100")} title="Fit / 100%">
+                    {zoomInfo.z <= 1.001 ? "Fit" : `${Math.round((zoomInfo.z / zoomInfo.z100) * 100)}%`}
+                  </button>
+                  <button className="chip" onClick={() => zoomTo("in")} aria-label="Zoom in">+</button>
+                </span>
+              )}
+              <button className={`chip toggle ${cropMode ? "on" : ""}`} onClick={() => setCropMode((c) => !c)} aria-pressed={cropMode} title="Crop and straighten (C)">
+                {cropMode ? "Done" : "Crop"}
+              </button>
               <button className={`chip toggle ${clipping ? "on" : ""}`} onClick={() => setClipping((c) => !c)} aria-pressed={clipping}>
                 {clipping ? "Hide clipping" : "Show clipping"}
               </button>
@@ -596,6 +597,35 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
             <p className="scope-empty">Add a photo to see its exposure and colour.</p>
           )}
         </div>
+
+        {cropMode && showing && (
+          <div className="group crop-group">
+            <div className="row">
+              <h2>Crop &amp; straighten</h2>
+              <button className="link" onClick={() => update((s) => void (s.crop = freshCrop()))} disabled={!cropActive(settings.crop)}>Reset</button>
+            </div>
+            <label className="field-label" htmlFor="aspect">Aspect ratio</label>
+            <div className="aspects" id="aspect" role="radiogroup">
+              {ASPECTS.map(([id, label]) => (
+                <button key={id} className={aspect === id ? "on" : ""} aria-pressed={aspect === id}
+                  onClick={() => {
+                    setAspect(id);
+                    update((s) => void (s.crop = cropToAspect(s.crop, showing.width, showing.height, aspectValue(id, showing))));
+                  }}>{label}</button>
+              ))}
+            </div>
+            <Slider label="Straighten" tip="c_angle" value={Math.round(settings.crop.angle * 10) / 10} min={-45} max={45} step={0.1} suffix="°"
+              onChange={(v) => update((s) => void (s.crop = fitCrop({ ...s.crop, angle: v }, showing.width, showing.height)))} />
+            <div className="btn-row">
+              <button onClick={() => update((s) => void (s.crop = { ...freshCrop(), rot90: (s.crop.rot90 + 3) % 4, flip_h: s.crop.flip_h }))} title="Rotate left">⟲ Rotate left</button>
+              <button onClick={() => update((s) => void (s.crop = { ...freshCrop(), rot90: (s.crop.rot90 + 1) % 4, flip_h: s.crop.flip_h }))} title="Rotate right">Rotate right ⟳</button>
+            </div>
+            <div className="btn-row">
+              <button onClick={() => update((s) => void (s.crop = { ...s.crop, flip_h: !s.crop.flip_h, x: 1 - s.crop.x - s.crop.w, angle: -s.crop.angle }))}>Flip</button>
+              <button className="primary" onClick={() => setCropMode(false)}>Done</button>
+            </div>
+          </div>
+        )}
 
         {/* looks */}
         <div className="group">

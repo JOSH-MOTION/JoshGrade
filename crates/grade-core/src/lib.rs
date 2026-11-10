@@ -11,6 +11,7 @@ pub mod camera;
 pub mod color;
 pub mod decode;
 pub mod encode;
+pub mod geometry;
 pub mod grade;
 pub mod learn;
 pub mod looks;
@@ -93,37 +94,22 @@ pub fn unique_output(input: &Path, dir: &Path, format: OutputFormat) -> PathBuf 
 
 /// Grade one file at full resolution and save it exactly at `output`.
 pub fn save_graded(input: &Path, output: &Path, settings: &Settings, format: OutputFormat, quality: u8, write_lut: bool) -> Result<SaveResult, Error> {
-    // When the output is a JPEG made from a JPEG we copy the EXIF (incl. orientation),
-    // so keep pixels un-rotated; otherwise bake the rotation into the pixels.
-    let keep_exif = format == OutputFormat::Jpeg && decode::is_jpeg(input);
+    // Pixels are always saved upright (EXIF is copied with its orientation reset).
     let (mut img, orientation) = decode::load_dynamic(input)?;
-    if !keep_exif {
-        img.apply_orientation(orientation);
-    }
+    img.apply_orientation(orientation);
     let raw = decode::is_raw(input);
-    // Analyse the same upright, reduced copy the app previews, so the saved file matches.
-    let mut upright = img.clone();
-    if keep_exif {
-        upright.apply_orientation(orientation);
-    }
-    let small = decode::to_photo(upright, Some(ANALYSIS_SIZE), raw);
+    // Analyse the same reduced copy the app previews, so the saved file matches.
+    let small = decode::to_photo(img.clone(), Some(ANALYSIS_SIZE), raw);
     let (analysis, grade) = grade_for(&small, settings)?;
     let mut full = decode::to_photo(img, None, raw);
     if settings.retouch.active() {
-        // Faces are found on the upright preview-size copy; retouch needs upright pixels too.
         let faces = retouch::find_faces(&small).map_err(|e| Error::Retouch(e.to_string()))?;
         if !faces.is_empty() {
-            if keep_exif {
-                let up = decode::orient_photo(&full, orientation, false);
-                let done = retouch::apply(&up, &faces, &settings.retouch);
-                full = decode::orient_photo(&done, orientation, true);
-            } else {
-                full = retouch::apply(&full, &faces, &settings.retouch);
-            }
+            full = retouch::apply(&full, &faces, &settings.retouch);
         }
     }
     drop(small);
-    let graded = grade.apply(&full);
+    let graded = finish(&grade.apply(&full), settings);
     drop(full);
 
     if let Some(dir) = output.parent() {
@@ -140,6 +126,11 @@ pub fn save_graded(input: &Path, output: &Path, settings: &Settings, format: Out
         None
     };
     Ok(SaveResult { input: input.to_path_buf(), output: output.to_path_buf(), lut, notes: analysis.notes })
+}
+
+/// Everything after the colour grade: detail, crop. (Same for preview and save.)
+pub fn finish(p: &Photo, settings: &Settings) -> Photo {
+    geometry::apply(p, &settings.crop)
 }
 
 /// Collect supported photos from files and folders (folders are scanned up to 3 levels deep).

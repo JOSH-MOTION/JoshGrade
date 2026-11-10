@@ -5,7 +5,7 @@ use base64::Engine;
 use grade_core::scopes::{self, Scopes};
 use grade_core::report::{self, Line, Measure};
 use grade_core::retouch::{self, Face, RetouchSettings};
-use grade_core::{decode, encode, lut, Adjust, Analysis, Grade, OutputFormat, Photo, Settings};
+use grade_core::{decode, encode, geometry, lut, Adjust, Analysis, Grade, OutputFormat, Photo, Settings};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -24,6 +24,8 @@ struct Entry {
     before_measure: Measure,
     /// Faces found for retouching (found once, the first time retouch is used).
     faces: Mutex<Option<Arc<Vec<Face>>>>,
+    /// Full-resolution size (upright), for 100% zoom.
+    full_dims: (u32, u32),
     /// The last retouched copy, so moving a grade slider doesn't redo the retouch.
     retouched: Mutex<Option<(RetouchSettings, Arc<Photo>)>>,
 }
@@ -69,6 +71,8 @@ struct RetouchInfo {
 struct AppState {
     cache: Mutex<HashMap<String, Arc<Entry>>>,
     cancel: Mutex<bool>,
+    /// Full-resolution copy of the photo being zoomed into (path + retouch settings).
+    full: Mutex<Option<(String, RetouchSettings, Arc<Photo>)>>,
 }
 
 type St<'a> = State<'a, Arc<AppState>>;
@@ -101,6 +105,9 @@ struct PreviewResult {
     scopes_after: Scopes,
     /// Set when retouch is on: how many faces were retouched.
     retouch: Option<RetouchInfo>,
+    /// Full-resolution size of the (turned) photo, for 100% zoom.
+    full_width: u32,
+    full_height: u32,
 }
 
 #[derive(Deserialize)]
@@ -142,12 +149,15 @@ fn cached(state: &AppState, path: &str) -> Result<Arc<Entry>, String> {
     if let Some(v) = state.cache.lock().unwrap().get(path) {
         return Ok(v.clone());
     }
-    let photo = decode::load(Path::new(path), Some(grade_core::ANALYSIS_SIZE), true).map_err(|e| e.to_string())?;
+    let (mut img, o) = decode::load_dynamic(Path::new(path)).map_err(|e| e.to_string())?;
+    img.apply_orientation(o);
+    let full_dims = (img.width(), img.height());
+    let photo = decode::to_photo(img, Some(grade_core::ANALYSIS_SIZE), decode::is_raw(Path::new(path)));
     let analysis = grade_core::analyze(&photo);
     let before_url = jpeg_url(&photo, 88)?;
     let before_scopes = scopes::compute(&photo);
     let before_measure = report::measure(&photo);
-    let entry = Arc::new(Entry { photo, analysis, before_url, before_scopes, before_measure, faces: Mutex::new(None), retouched: Mutex::new(None) });
+    let entry = Arc::new(Entry { photo, analysis, before_url, before_scopes, before_measure, faces: Mutex::new(None), retouched: Mutex::new(None), full_dims });
     let mut c = state.cache.lock().unwrap();
     if c.len() > 16 {
         c.clear(); // keep memory bounded
@@ -196,20 +206,90 @@ async fn preview(state: St<'_>, path: String, settings: Settings, with_before: b
         let e = cached(&st, &path)?;
         let grade = grade_core::grade_with(&e.analysis, &settings).map_err(|e| e.to_string())?;
         let (base, retouch) = e.base(&settings.retouch)?;
+        let cr = settings.crop;
+        let turned = cr.rot90 % 4 != 0 || cr.flip_h;
         let after = grade.apply(base.as_deref().unwrap_or(&e.photo));
+        // Quarter turns are applied here; straighten + crop are shown by the viewer.
+        let after = geometry::turn(&after, cr.rot90, cr.flip_h);
         let overlay = if clipping { Some(png_url(&scopes::clipping_overlay(&after))?) } else { None };
+        let (fw, fh) = if cr.rot90 % 2 == 1 { (e.full_dims.1, e.full_dims.0) } else { e.full_dims };
         Ok(PreviewResult {
-            before: with_before.then(|| e.before_url.clone()),
+            full_width: fw,
+            full_height: fh,
+            before: if !with_before { None } else if turned { Some(jpeg_url(&geometry::turn(&e.photo, cr.rot90, cr.flip_h), 88)?) } else { Some(e.before_url.clone()) },
             after: jpeg_url(&after, 88)?,
             overlay,
-            width: e.photo.width,
-            height: e.photo.height,
+            width: after.width,
+            height: after.height,
             report: report::compare(&e.before_measure, &report::measure(&after)),
             auto_adjust: if settings.auto { grade_core::auto_sliders(&e.analysis.params) } else { Adjust::default() },
             scopes_before: e.before_scopes.clone(),
             scopes_after: scopes::compute(&after),
             retouch,
         })
+    })
+    .await
+}
+
+/// A sharp, full-resolution piece of the photo for zooming in. `region` = x, y, w, h as
+/// fractions of the (turned) photo; the result is at most `max_px` on its long side.
+#[tauri::command]
+async fn preview_region(state: St<'_>, path: String, settings: Settings, region: [f32; 4], max_px: u32, before: bool) -> Result<String, String> {
+    let st = Arc::clone(&state);
+    blocking(move || {
+        let e = cached(&st, &path)?;
+        let r = if before { RetouchSettings::default() } else { settings.retouch };
+        // full-resolution (retouched) base, cached for the photo being zoomed
+        let base = {
+            let hit = st.full.lock().unwrap().as_ref().filter(|(p, rs, _)| *p == path && (*rs == r || !r.active() && !rs.active())).map(|x| x.2.clone());
+            match hit {
+                Some(b) => b,
+                None => {
+                    *st.full.lock().unwrap() = None; // free the old one first
+                    let mut full = decode::load(Path::new(&path), None, true).map_err(|e| e.to_string())?;
+                    if r.active() {
+                        let faces = retouch::find_faces(&e.photo).map_err(|e| e.to_string())?;
+                        full = retouch::apply(&full, &faces, &r);
+                    }
+                    let b = Arc::new(full);
+                    *st.full.lock().unwrap() = Some((path.clone(), r, b.clone()));
+                    b
+                }
+            }
+        };
+        // region in the turned frame -> the stored (upright) frame
+        let cr = settings.crop;
+        let map = |x: f32, y: f32| -> (f32, f32) {
+            let x = if cr.flip_h { 1.0 - x } else { x };
+            match cr.rot90 % 4 {
+                0 => (x, y),
+                1 => (y, 1.0 - x),
+                2 => (1.0 - x, 1.0 - y),
+                _ => (1.0 - y, x),
+            }
+        };
+        let [rx, ry, rw, rh] = region;
+        let (a, b) = (map(rx, ry), map(rx + rw, ry + rh));
+        let (x0, x1) = (a.0.min(b.0).clamp(0.0, 1.0), a.0.max(b.0).clamp(0.0, 1.0));
+        let (y0, y1) = (a.1.min(b.1).clamp(0.0, 1.0), a.1.max(b.1).clamp(0.0, 1.0));
+        let (bw, bh) = (base.width as f32, base.height as f32);
+        let (px0, py0) = ((x0 * bw) as u32, (y0 * bh) as u32);
+        let pw = (((x1 - x0) * bw).ceil() as u32).clamp(1, base.width - px0.min(base.width - 1));
+        let ph = (((y1 - y0) * bh).ceil() as u32).clamp(1, base.height - py0.min(base.height - 1));
+        let mut piece = grade_core::Photo { width: pw, height: ph, data: Vec::with_capacity((pw * ph) as usize), from_raw: base.from_raw };
+        for y in py0..py0 + ph {
+            let row = (y * base.width + px0) as usize;
+            piece.data.extend_from_slice(&base.data[row..row + pw as usize]);
+        }
+        if !before {
+            let grade = grade_core::grade_with(&e.analysis, &settings).map_err(|e| e.to_string())?;
+            piece = grade.apply(&piece);
+        }
+        let mut piece = geometry::turn(&piece, cr.rot90, cr.flip_h);
+        if piece.width.max(piece.height) > max_px {
+            piece = shrink(&piece, max_px);
+        }
+        jpeg_url(&piece, 90)
     })
     .await
 }
@@ -446,6 +526,7 @@ fn main() {
             save_batch,
             cancel_batch,
             retouch_model,
+            preview_region,
             open_in_photoshop,
             retouch_download,
             jobs::jobs_list,

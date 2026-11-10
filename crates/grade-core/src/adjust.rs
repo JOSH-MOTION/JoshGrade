@@ -32,11 +32,13 @@ pub struct Settings {
     pub adjust: Adjust,
     /// Automatic portrait retouch (off unless turned on).
     pub retouch: crate::RetouchSettings,
+    /// Crop, rotate, straighten.
+    pub crop: crate::geometry::Crop,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { auto: true, look: "natural".into(), strength: 1.0, adjust: Adjust::default(), retouch: Default::default() }
+        Settings { auto: true, look: "natural".into(), strength: 1.0, adjust: Adjust::default(), retouch: Default::default(), crop: Default::default() }
     }
 }
 

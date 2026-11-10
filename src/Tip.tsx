@@ -25,6 +25,7 @@ export const TIPS: Record<string, string> = {
   s_vibrance: "Boosts dull colours more than strong ones and protects skin. The safe way to add colour.",
   s_saturation: "Makes every colour stronger or weaker by the same amount. −100 is black & white.",
   s_strength: "How strongly the look and corrections are applied. 0% is the original photo, 100% is as designed, above 100% exaggerates it.",
+  c_angle: "Levels a tilted horizon or building. The crop shrinks automatically so no empty corners show.",
   r_auto: "Finds every face and retouches the skin like a careful retoucher: heals spots, evens redness and calms shine, while keeping pores, freckles, moles, beards and the person's real skin colour. Works on every skin tone.",
   r_blemish: "Removes acne, spots and marks. Each one is filled with the colour of the skin around it and real pore texture from nearby, so it doesn't look painted over.",
   r_smooth: "Softens blotchiness and uneven texture. Pores and fine skin texture always stay, and strong features (smile lines, the shape of the face) are kept. Around 30–50% looks natural.",
