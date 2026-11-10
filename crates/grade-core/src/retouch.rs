@@ -69,7 +69,7 @@ pub enum RetouchError {
     Model(String),
 }
 
-type Plan = Arc<SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>>;
+pub(crate) type Plan = Arc<TypedRunnableModel>;
 
 static MODEL_DIR: OnceLock<PathBuf> = OnceLock::new();
 static DETECTOR: OnceLock<Result<Plan, String>> = OnceLock::new();
@@ -93,8 +93,20 @@ pub fn parser_path() -> PathBuf {
     model_dir().join(PARSER_FILE)
 }
 
+/// Every downloadable model: (file, url, MB). Face map for retouch, person and scene for masks.
+pub const MODELS: [(&str, &str, u32); 3] = [
+    (PARSER_FILE, PARSER_URL, 53),
+    (crate::masks::SUBJECT_FILE, crate::masks::SUBJECT_URL, 26),
+    (crate::masks::SKY_FILE, crate::masks::SKY_URL, 15),
+];
+
 pub fn model_ready() -> bool {
     parser_path().exists()
+}
+
+/// A model output as plain floats.
+pub(crate) fn f32s(t: &Tensor) -> Result<Vec<f32>, String> {
+    t.try_as_plain_ram().and_then(|v| v.as_slice::<f32>().map(|s| s.to_vec())).map_err(|e| e.to_string())
 }
 
 fn detector() -> Result<Plan, RetouchError> {
@@ -353,7 +365,7 @@ fn detect(photo: &Photo) -> Result<Vec<Det>, RetouchError> {
     }
     let t = Tensor::from_shape(&[1, 3, 640, 640], &input).map_err(|e| RetouchError::Model(e.to_string()))?;
     let out = detector()?.run(tvec!(t.into())).map_err(|e| RetouchError::Model(e.to_string()))?;
-    let view = |i: usize| out[i].as_slice::<f32>().map(|s| s.to_vec()).unwrap_or_default();
+    let view = |i: usize| f32s(&out[i]).unwrap_or_default();
     let mut faces = Vec::new();
     for (k, st) in [8usize, 16, 32].iter().enumerate() {
         let cols = 640 / st;
@@ -448,7 +460,8 @@ pub fn find_faces(photo: &Photo) -> Result<Vec<Face>, RetouchError> {
         }
         let t = Tensor::from_shape(&[1, 3, 512, 512], &input).map_err(|e| RetouchError::Model(e.to_string()))?;
         let o = parse.run(tvec!(t.into())).map_err(|e| RetouchError::Model(e.to_string()))?;
-        let lg = o[0].as_slice::<f32>().map_err(|e| RetouchError::Model(e.to_string()))?;
+        let lg = f32s(&o[0]).map_err(RetouchError::Model)?;
+        let lg = &lg[..];
         let n = 512 * 512;
         let mut skin = Plane::new(512, 512, 0.0);
         let mut prot = Plane::new(512, 512, 0.0);

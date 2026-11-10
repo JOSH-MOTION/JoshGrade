@@ -5,7 +5,7 @@ use base64::Engine;
 use grade_core::scopes::{self, Scopes};
 use grade_core::report::{self, Line, Measure};
 use grade_core::retouch::{self, Face, RetouchSettings};
-use grade_core::{decode, encode, geometry, lut, Adjust, Analysis, Grade, OutputFormat, Photo, Settings};
+use grade_core::{decode, encode, geometry, lut, masks, Adjust, Analysis, Grade, OutputFormat, Photo, Settings};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -28,9 +28,25 @@ struct Entry {
     full_dims: (u32, u32),
     /// The last retouched copy, so moving a grade slider doesn't redo the retouch.
     retouched: Mutex<Option<(RetouchSettings, Arc<Photo>)>>,
+    /// Where the person and the sky are (found the first time an AI mask is used).
+    seg: Mutex<Option<Arc<masks::Segments>>>,
 }
 
 impl Entry {
+    /// Person / sky maps, when a mask needs them.
+    fn segments(&self, m: &[masks::Mask]) -> Result<Option<Arc<masks::Segments>>, String> {
+        if !masks::needs_ai(m) {
+            return Ok(None);
+        }
+        let mut g = self.seg.lock().unwrap();
+        if let Some(s) = &*g {
+            return Ok(Some(s.clone()));
+        }
+        let s = Arc::new(masks::segment(&self.photo).map_err(|e| if e == "model-missing" { "mask-model-missing".to_string() } else { e })?);
+        *g = Some(s.clone());
+        Ok(Some(s))
+    }
+
     /// The photo to grade: the original, or the retouched copy when retouch is on.
     fn base(&self, r: &RetouchSettings) -> Result<(Option<Arc<Photo>>, Option<RetouchInfo>), String> {
         if !r.active() {
@@ -157,7 +173,7 @@ fn cached(state: &AppState, path: &str) -> Result<Arc<Entry>, String> {
     let before_url = jpeg_url(&photo, 88)?;
     let before_scopes = scopes::compute(&photo);
     let before_measure = report::measure(&photo);
-    let entry = Arc::new(Entry { photo, analysis, before_url, before_scopes, before_measure, faces: Mutex::new(None), retouched: Mutex::new(None), full_dims });
+    let entry = Arc::new(Entry { photo, analysis, before_url, before_scopes, before_measure, faces: Mutex::new(None), retouched: Mutex::new(None), seg: Mutex::new(None), full_dims });
     let mut c = state.cache.lock().unwrap();
     if c.len() > 16 {
         c.clear(); // keep memory bounded
@@ -209,6 +225,8 @@ async fn preview(state: St<'_>, path: String, settings: Settings, with_before: b
         let cr = settings.crop;
         let turned = cr.rot90 % 4 != 0 || cr.flip_h;
         let after = grade.apply(base.as_deref().unwrap_or(&e.photo));
+        let seg = if masks::active(&settings.masks) { e.segments(&settings.masks)? } else { None };
+        let after = masks::apply(&after, &settings.masks, seg.as_deref(), &masks::View::whole(&after));
         // detail at preview scale (sharpening only shows at 100% zoom, like Lightroom)
         let k = e.photo.width.max(e.photo.height) as f32 / e.full_dims.0.max(e.full_dims.1).max(1) as f32;
         let after = grade_core::detail::apply(&after, &settings.detail, k);
@@ -288,7 +306,10 @@ async fn preview_region(state: St<'_>, path: String, settings: Settings, region:
         }
         if !before {
             let grade = grade_core::grade_with(&e.analysis, &settings).map_err(|e| e.to_string())?;
-            piece = grade_core::detail::apply(&grade.apply(&piece), &settings.detail, 1.0);
+            let seg = if masks::active(&settings.masks) { e.segments(&settings.masks)? } else { None };
+            let view = masks::View { full_w: bw, full_h: bh, x0: px0 as f32, y0: py0 as f32, step: 1.0 };
+            let graded = masks::apply(&grade.apply(&piece), &settings.masks, seg.as_deref(), &view);
+            piece = grade_core::detail::apply(&graded, &settings.detail, 1.0);
         }
         let mut piece = geometry::turn(&piece, cr.rot90, cr.flip_h);
         if !before && settings.detail.framed() {
@@ -456,6 +477,26 @@ async fn save_batch(app: tauri::AppHandle, state: St<'_>, req: BatchRequest) -> 
     .await
 }
 
+/// A red see-through picture of where one mask is, the same size as the preview.
+#[tauri::command]
+async fn mask_overlay(state: St<'_>, path: String, settings: Settings, index: usize) -> Result<String, String> {
+    let st = Arc::clone(&state);
+    blocking(move || {
+        let e = cached(&st, &path)?;
+        let m = settings.masks.get(index).ok_or("no such mask")?;
+        let seg = e.segments(std::slice::from_ref(m))?;
+        let v = masks::values(&e.photo, m, seg.as_deref(), &masks::View::whole(&e.photo));
+        let p = Photo { width: e.photo.width, height: e.photo.height, data: v.iter().map(|&a| [a, a, a]).collect(), from_raw: false };
+        let p = geometry::turn(&p, settings.crop.rot90, settings.crop.flip_h);
+        let img = image::RgbaImage::from_fn(p.width, p.height, |x, y| {
+            let a = p.data[(y * p.width + x) as usize][0];
+            image::Rgba([255, 45, 70, (a * 140.0) as u8])
+        });
+        png_url(&img)
+    })
+    .await
+}
+
 #[derive(Serialize)]
 struct RetouchModel {
     ready: bool,
@@ -467,52 +508,67 @@ fn retouch_model() -> RetouchModel {
     RetouchModel { ready: retouch::model_ready(), size_mb: retouch::PARSER_MB }
 }
 
+/// Are the person / sky models here? (about 41 MB, downloaded once)
+#[tauri::command]
+fn mask_model() -> RetouchModel {
+    RetouchModel { ready: masks::models_ready(), size_mb: 41 }
+}
+
 #[derive(Serialize, Clone)]
 struct DlProgress {
     got: u64,
     total: u64,
 }
 
+fn download(app: &tauri::AppHandle, url: &str, dest: &Path, mb: u32, base: u64, all: u64) -> Result<(), String> {
+    use std::io::{Read, Write};
+    if dest.exists() {
+        return Ok(());
+    }
+    let dir = dest.parent().unwrap().to_path_buf();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let resp = ureq::get(url).call().map_err(|e| format!("Couldn't download ({e}). Check your internet connection and try again."))?;
+    let total: u64 = resp.header("Content-Length").and_then(|v| v.parse().ok()).unwrap_or(mb as u64 * 1_000_000);
+    let part = dest.with_extension("part");
+    let mut f = std::fs::File::create(&part).map_err(|e| e.to_string())?;
+    let mut r = resp.into_reader();
+    let mut buf = vec![0u8; 1 << 16];
+    let (mut got, mut last) = (0u64, 0u64);
+    loop {
+        let n = r.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        f.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+        got += n as u64;
+        if got - last > 500_000 {
+            last = got;
+            let _ = app.emit("retouch-download", DlProgress { got: base + got, total: all });
+        }
+    }
+    drop(f);
+    if got < total * 9 / 10 {
+        let _ = std::fs::remove_file(&part);
+        return Err("The download was cut off. Try again.".into());
+    }
+    std::fs::rename(&part, dest).map_err(|e| e.to_string())?;
+    let _ = app.emit("retouch-download", DlProgress { got: base + got, total: all });
+    Ok(())
+}
+
 /// Download the face map model once (about 53 MB). Retouch works offline after that.
 #[tauri::command]
 async fn retouch_download(app: tauri::AppHandle) -> Result<(), String> {
-    use std::io::{Read, Write};
+    blocking(move || download(&app, retouch::PARSER_URL, &retouch::parser_path(), retouch::PARSER_MB, 0, retouch::PARSER_MB as u64 * 1_000_000)).await
+}
+
+/// Download the person + sky models once (about 41 MB). Masks work offline after that.
+#[tauri::command]
+async fn mask_download(app: tauri::AppHandle) -> Result<(), String> {
     blocking(move || {
-        let dest = retouch::parser_path();
-        if dest.exists() {
-            return Ok(());
-        }
-        let dir = dest.parent().unwrap().to_path_buf();
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let resp = ureq::get(retouch::PARSER_URL)
-            .call()
-            .map_err(|e| format!("Couldn't download the retouch engine ({e}). Check your internet connection and try again."))?;
-        let total: u64 = resp.header("Content-Length").and_then(|v| v.parse().ok()).unwrap_or(retouch::PARSER_MB as u64 * 1_000_000);
-        let part = dir.join("face_parsing.part");
-        let mut f = std::fs::File::create(&part).map_err(|e| e.to_string())?;
-        let mut r = resp.into_reader();
-        let mut buf = vec![0u8; 1 << 16];
-        let (mut got, mut last) = (0u64, 0u64);
-        loop {
-            let n = r.read(&mut buf).map_err(|e| e.to_string())?;
-            if n == 0 {
-                break;
-            }
-            f.write_all(&buf[..n]).map_err(|e| e.to_string())?;
-            got += n as u64;
-            if got - last > 500_000 {
-                last = got;
-                let _ = app.emit("retouch-download", DlProgress { got, total });
-            }
-        }
-        drop(f);
-        if got < total * 9 / 10 {
-            let _ = std::fs::remove_file(&part);
-            return Err("The download was cut off. Try again.".into());
-        }
-        std::fs::rename(&part, &dest).map_err(|e| e.to_string())?;
-        let _ = app.emit("retouch-download", DlProgress { got, total });
-        Ok(())
+        let d = retouch::model_dir();
+        download(&app, masks::SUBJECT_URL, &d.join(masks::SUBJECT_FILE), 26, 0, 41_000_000)?;
+        download(&app, masks::SKY_URL, &d.join(masks::SKY_FILE), 15, 26_000_000, 41_000_000)
     })
     .await
 }
@@ -545,6 +601,9 @@ fn main() {
             preview_region,
             open_in_photoshop,
             retouch_download,
+            mask_model,
+            mask_download,
+            mask_overlay,
             jobs::jobs_list,
             jobs::job_cancel,
             jobs::jobs_clear,

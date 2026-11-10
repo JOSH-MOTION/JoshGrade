@@ -18,6 +18,7 @@ pub mod grade;
 pub mod learn;
 pub mod looks;
 pub mod lut;
+pub mod masks;
 pub mod report;
 pub mod retouch;
 pub mod scopes;
@@ -110,8 +111,11 @@ pub fn save_graded(input: &Path, output: &Path, settings: &Settings, format: Out
             full = retouch::apply(&full, &faces, &settings.retouch);
         }
     }
+    let seg = if masks::needs_ai(&settings.masks) && masks::active(&settings.masks) { Some(masks::segment(&small).map_err(Error::Retouch)?) } else { None };
     drop(small);
-    let graded = finish(&grade.apply(&full), settings);
+    let graded = grade.apply(&full);
+    let graded = masks::apply(&graded, &settings.masks, seg.as_ref(), &masks::View::whole(&graded));
+    let graded = finish(&graded, settings);
     drop(full);
 
     if let Some(dir) = output.parent() {

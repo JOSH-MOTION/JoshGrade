@@ -107,6 +107,16 @@ if [ ! -f "$FACE_DIR/face_parsing_resnet18.onnx" ]; then
     && mv "$FACE_DIR/face_parsing.part" "$FACE_DIR/face_parsing_resnet18.onnx" \
     || { rm -f "$FACE_DIR/face_parsing.part"; echo "(Couldn't get it now - the app will offer to download it.)"; }
 fi
+# Person + sky engines for Masks (41 MB, once).
+for pair in "subject_modnet.onnx https://huggingface.co/Xenova/modnet/resolve/main/onnx/model.onnx" \
+            "scene_segformer_b0.onnx https://huggingface.co/Xenova/segformer-b0-finetuned-ade-512-512/resolve/main/onnx/model.onnx"; do
+  set -- $pair
+  if [ ! -f "$FACE_DIR/$1" ]; then
+    echo "Getting the mask engine ($1)..."
+    curl -fsSL "$2" -o "$FACE_DIR/$1.part" && mv "$FACE_DIR/$1.part" "$FACE_DIR/$1" \
+      || { rm -f "$FACE_DIR/$1.part"; echo "(Couldn't get it now - the app will offer to download it.)"; }
+  fi
+done
 
 say "Step 6/6: Building JoshGrade (the long part - lots of text will scroll by, that's normal)..."
 npm ci --no-audit --no-fund

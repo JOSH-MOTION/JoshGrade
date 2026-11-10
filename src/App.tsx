@@ -1,4 +1,4 @@
-import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ReactNode, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -8,6 +8,7 @@ import { ColorWheel, Histogram, ScopeData, bandColor } from "./Scopes";
 import { Tip } from "./Tip";
 import { CurveEditor, Curves, freshCurves } from "./CurveEditor";
 import { Crop, cropActive, cropToAspect, fitCrop, freshCrop, Viewer } from "./Viewer";
+import { Brush, KINDS, Mask, MaskAdjust, MaskKind, freshMaskAdjust, isAi, newMask } from "./Masks";
 
 type Look = { id: string; name: string; description: string };
 type Adjust = {
@@ -24,7 +25,7 @@ const freshDetail = (): Detail => ({
   vignette: 0, vignette_midpoint: 50, vignette_feather: 50, grain: 0, grain_size: 25,
 });
 type Retouch = { enabled: boolean; blemishes: number; smooth: number; even: number; shine: number; keep_moles: boolean; keep_freckles: boolean };
-type Settings = { auto: boolean; look: string; strength: number; adjust: Adjust; retouch: Retouch; crop: Crop; curves: Curves; detail: Detail };
+type Settings = { auto: boolean; look: string; strength: number; adjust: Adjust; retouch: Retouch; crop: Crop; curves: Curves; detail: Detail; masks: Mask[] };
 type ReportLine = { key: string; label: string; before: string; after: string; verdict: string; status: "good" | "warn" | "info" };
 type Photo = { path: string; name: string; thumb?: string; saved?: string; error?: string };
 type Preview = {
@@ -45,8 +46,8 @@ const freshAdjust = (): Adjust => ({
   hue: ZERO8(), sat: ZERO8(), lum: ZERO8(),
 });
 const freshRetouch = (): Retouch => ({ enabled: false, blemishes: 1, smooth: 0.45, even: 0.5, shine: 0.35, keep_moles: true, keep_freckles: true });
-const freshSettings = (): Settings => ({ auto: true, look: "natural", strength: 1, adjust: freshAdjust(), retouch: freshRetouch(), crop: freshCrop(), curves: freshCurves(), detail: freshDetail() });
-const clone = (s: Settings): Settings => JSON.parse(JSON.stringify(s));
+const freshSettings = (): Settings => ({ auto: true, look: "natural", strength: 1, adjust: freshAdjust(), retouch: freshRetouch(), crop: freshCrop(), curves: freshCurves(), detail: freshDetail(), masks: [] });
+const clone = <T,>(s: T): T => JSON.parse(JSON.stringify(s));
 
 const EXTENSIONS = [
   "jpg", "jpeg", "png", "tif", "tiff", "webp", "heic", "heif",
@@ -91,7 +92,7 @@ function Slider({ label, tip, value, auto = 0, onChange, min = -100, max = 100, 
   label: string; tip?: string; value: number; auto?: number; onChange: (offset: number) => void;
   min?: number; max?: number; track?: string; suffix?: string; step?: number; def?: number;
 }) {
-  const id = `s-${label.replace(/\W/g, "")}-${tip ?? ""}`;
+  const id = `s-${label.replace(/\W/g, "")}-${useId().replace(/:/g, "")}`;
   const shown = Math.max(min, Math.min(max, auto + value));
   const reset = () => onChange(def !== undefined ? def : min < 0 ? 0 : 100 - auto);
   const autoPos = ((Math.max(min, Math.min(max, auto)) - min) / (max - min)) * 100;
@@ -178,6 +179,7 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
     crop: stored.crop ?? freshCrop(),
     curves: stored.curves ?? freshCurves(),
     detail: { ...freshDetail(), ...stored.detail },
+    masks: (stored.masks ?? []).map((m) => ({ ...m, adjust: { ...freshMaskAdjust(), ...m.adjust } })),
   };
   // Retouch engine: the face map model is downloaded once, then everything runs offline.
   const [rModel, setRModel] = useState<{ ready: boolean; size_mb: number } | null>(null);
@@ -188,10 +190,35 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
     const un = listen<{ got: number; total: number }>("retouch-download", (e) => setRDl(e.payload));
     return () => void un.then((f) => f());
   }, []);
-  // What actually gets rendered/saved: retouch only once its engine is there.
-  const eff = (s: Settings): Settings => (s.retouch?.enabled && !rModel?.ready ? { ...s, retouch: { ...s.retouch, enabled: false } } : s);
+  // Mask engine (person + sky): downloaded once too.
+  const [mModel, setMModel] = useState<{ ready: boolean; size_mb: number } | null>(null);
+  const [dlKind, setDlKind] = useState<"face" | "masks" | null>(null);
+  useEffect(() => {
+    invoke<{ ready: boolean; size_mb: number }>("mask_model").then(setMModel).catch(() => {});
+  }, []);
+  const downloadMasks = async () => {
+    setRErr(null);
+    setDlKind("masks");
+    setRDl({ got: 0, total: (mModel?.size_mb ?? 41) * 1e6 });
+    try {
+      await invoke("mask_download");
+      setMModel((m) => ({ size_mb: m?.size_mb ?? 41, ready: true }));
+    } catch (e) {
+      setRErr(String(e));
+    }
+    setRDl(null);
+    setDlKind(null);
+  };
+  // What actually gets rendered/saved: retouch / AI masks only once their engine is there.
+  const eff = (s: Settings): Settings => {
+    let o = s;
+    if (s.retouch?.enabled && !rModel?.ready) o = { ...o, retouch: { ...s.retouch, enabled: false } };
+    if (!mModel?.ready && (s.masks ?? []).some((m) => isAi(m.kind))) o = { ...o, masks: (s.masks ?? []).filter((m) => !isAi(m.kind)) };
+    return o;
+  };
   const downloadRetouch = async () => {
     setRErr(null);
+    setDlKind("face");
     setRDl({ got: 0, total: (rModel?.size_mb ?? 53) * 1e6 });
     try {
       await invoke("retouch_download");
@@ -200,10 +227,11 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
       setRErr(String(e));
     }
     setRDl(null);
+    setDlKind(null);
   };
   // A photo takes your latest settings the first time you open it, then keeps its own.
   useEffect(() => {
-    if (current && !settingsMap[current.path]) setSettingsMap((m) => ({ ...m, [current.path]: { ...clone(lastUsed), crop: freshCrop() } }));
+    if (current && !settingsMap[current.path]) setSettingsMap((m) => ({ ...m, [current.path]: { ...clone(lastUsed), crop: freshCrop(), masks: [] } }));
   }, [current?.path]);
 
   // ---------- history (undo / redo), per photo
@@ -229,11 +257,11 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
       }
       setSettingsMap((m) => {
         const prev = m[current.path] ?? lastUsed;
-        const s = clone({ ...prev, adjust: { ...freshAdjust(), ...prev.adjust }, curves: prev.curves ?? freshCurves(), detail: { ...freshDetail(), ...prev.detail }, crop: prev.crop ?? freshCrop(), retouch: prev.retouch ?? freshRetouch() });
+        const s = clone({ ...prev, adjust: { ...freshAdjust(), ...prev.adjust }, curves: prev.curves ?? freshCurves(), detail: { ...freshDetail(), ...prev.detail }, crop: prev.crop ?? freshCrop(), retouch: prev.retouch ?? freshRetouch(), masks: prev.masks ?? [] });
         fn(s);
         if (JSON.stringify(s) === JSON.stringify(prev)) return m;
         remember(current.path, prev);
-        setLastUsed({ ...clone(s), crop: freshCrop() });
+        setLastUsed({ ...clone(s), crop: freshCrop(), masks: [] });
         return { ...m, [current.path]: s };
       });
     },
@@ -292,14 +320,57 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
     if (!name) return;
     const { crop: _c, ...rest } = clone(settings);
     void _c;
-    setPresets((p) => [...p.filter((x) => x.name !== name), { name, settings: { ...rest, crop: freshCrop() } }]);
+    // a preset keeps the AI masks (person, sky…), which fit any photo; painted / placed ones belong to this photo
+    setPresets((p) => [...p.filter((x) => x.name !== name), { name, settings: { ...rest, crop: freshCrop(), masks: (rest.masks ?? []).filter((m) => isAi(m.kind)) } }]);
     setNaming(null);
     setToast({ text: `Saved preset "${name}". It's under Look › Your presets.` });
   };
-  const applyPreset = (pr: Preset) => update((s) => void Object.assign(s, { ...clone(pr.settings), crop: s.crop }));
+  const applyPreset = (pr: Preset) => update((s) => void Object.assign(s, { ...clone(pr.settings), crop: s.crop, masks: [...(pr.settings.masks ?? []).map(clone), ...s.masks.filter((m) => !isAi(m.kind))] }));
   const setAdj = (key: keyof Omit<Adjust, "hue" | "sat" | "lum">) => (v: number) => update((s) => void (s.adjust[key] = v));
   const setDet = (key: keyof Detail) => (v: number) => update((s) => void (s.detail[key] = v));
   const setBandAdj = (key: "hue" | "sat" | "lum") => (v: number) => update((s) => void (s.adjust[key][band] = v));
+
+  // ---------- masks (local adjustments)
+  const [maskSel, setMaskSel] = useState<number | null>(null);
+  const [maskOverlay, setMaskOverlay] = useState(true);
+  const [brush, setBrush] = useState<Brush>({ size: 0.04, feather: 0.6, flow: 1, erase: false });
+  const [overlayUrl, setOverlayUrl] = useState<string | null>(null);
+  const selMask = maskSel !== null ? settings.masks[maskSel] : undefined;
+  useEffect(() => setMaskSel(null), [current?.path]);
+  useEffect(() => {
+    if (maskSel !== null && maskSel >= settings.masks.length) setMaskSel(settings.masks.length ? settings.masks.length - 1 : null);
+  }, [settings.masks.length, maskSel]);
+  const addMask = (kind: MaskKind) => {
+    update((s) => void s.masks.push(newMask(kind, s.masks)));
+    setMaskSel(settings.masks.length);
+    setMaskOverlay(true);
+    setCropMode(false);
+  };
+  const setMask = (i: number, fn: (m: Mask) => void) => update((s) => void fn(s.masks[i]));
+  const setMaskAdj = (key: keyof MaskAdjust) => (v: number) => maskSel !== null && setMask(maskSel, (m) => void (m.adjust[key] = v));
+  // red overlay showing where the selected mask is
+  const overlayKey = selMask && maskOverlay ? JSON.stringify({ m: { ...selMask, adjust: 0, amount: 0, name: 0, enabled: 0 }, r: settings.crop.rot90, f: settings.crop.flip_h, ready: mModel?.ready }) : "";
+  useEffect(() => {
+    if (!overlayKey || !current || maskSel === null) {
+      setOverlayUrl(null);
+      return;
+    }
+    if (isAi(selMask!.kind) && !mModel?.ready) {
+      setOverlayUrl(null);
+      return;
+    }
+    let cancelled = false;
+    const t = setTimeout(() => {
+      invoke<string>("mask_overlay", { path: current.path, settings: eff(settings), index: maskSel })
+        .then((u) => !cancelled && setOverlayUrl(u))
+        .catch(() => !cancelled && setOverlayUrl(null));
+    }, 60);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [overlayKey, current?.path, maskSel]);
 
   // ---------- adding photos
   const addPaths = useCallback(
@@ -444,7 +515,13 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
       if (e.key.toLowerCase() === "j" && !e.repeat) setClipping((c) => !c);
       if (e.key.toLowerCase() === "c" && !e.repeat) setCropMode((c) => !c);
       if (e.key.toLowerCase() === "z" && !e.repeat) zoomTo("100");
-      if (e.key === "Escape") setCropMode(false);
+      if (e.key.toLowerCase() === "o" && !e.repeat) setMaskOverlay((o) => !o);
+      if (e.key === "[" ) setBrush((b) => ({ ...b, size: Math.max(0.004, b.size / 1.2) }));
+      if (e.key === "]") setBrush((b) => ({ ...b, size: Math.min(0.3, b.size * 1.2) }));
+      if (e.key === "Escape") {
+        setCropMode(false);
+        setMaskSel(null);
+      }
       if (e.key === "Enter" && (e.target as HTMLElement).tagName !== "BUTTON") setCropMode(false);
     };
     const up = (e: KeyboardEvent) => e.key.toLowerCase() === "b" && setShowBefore(false);
@@ -467,7 +544,7 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
     const targets = paths ?? photos.map((p) => p.path);
     for (const p of targets) if (settingsMap[p]) remember(p, settingsMap[p]);
     // each photo keeps its own crop
-    setSettingsMap((m) => ({ ...m, ...Object.fromEntries(targets.map((p) => [p, { ...clone(s), crop: m[p]?.crop ?? freshCrop() }])) }));
+    setSettingsMap((m) => ({ ...m, ...Object.fromEntries(targets.map((p) => [p, { ...clone(s), crop: m[p]?.crop ?? freshCrop(), masks: [...s.masks.filter((k) => isAi(k.kind)), ...(m[p]?.masks ?? []).filter((k) => !isAi(k.kind))] }])) }));
     setToast({ text: `These settings now apply to ${paths ? targets.length : `all ${targets.length}`} photos. Each one still gets its own automatic correction.` });
   };
 
@@ -618,7 +695,7 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
                 <Viewer
                   after={showing.after}
                   before={beforeUrl}
-                  overlay={clipping ? showing.overlay : null}
+                  overlay={selMask && maskOverlay && overlayUrl ? overlayUrl : clipping ? showing.overlay : null}
                   W={showing.width}
                   H={showing.height}
                   fullW={showing.full_width || showing.width}
@@ -636,6 +713,7 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
                   tileKey={`${current.path}|${settingsKey}`}
                   zoomCmd={zoomCmd}
                   onZoom={(z, z100) => setZoomInfo({ z, z100 })}
+                  maskTool={selMask && maskSel !== null ? { mask: selMask, brush, onChange: (m) => update((s) => void (s.masks[maskSel] = m)) } : null}
                 />
               ) : (
                 <div className="developing">
@@ -658,6 +736,16 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
               <span className="foot-name">{current.name}</span>
               {cropMode ? (
                 <span className="hint">Drag the corners or edges to crop, drag inside to move. Enter or C when done.</span>
+              ) : selMask ? (
+                <span className="hint">
+                  {selMask.kind === "brush"
+                    ? "Paint on the photo. [ and ] change the brush size. O shows or hides the red mask."
+                    : selMask.kind === "linear"
+                      ? "Drag the outer dots to place the filter, the middle dot to move it. O shows the mask."
+                      : selMask.kind === "radial"
+                        ? "Drag the centre to move, the edge dots to resize and turn. O shows the mask."
+                        : "Red shows where the change goes. O shows or hides it. Esc when done."}
+                </span>
               ) : (
                 <span className="hint">{zoomInfo.z > 1.01 ? "Drag or scroll to move around. Double-click to fit." : "Drag across the photo to compare. Double-click or Z to zoom to 100%. Hold B for the original."}</span>
               )}
@@ -846,6 +934,92 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
               <p className="save-hint">Hold B to compare with the original.</p>
             </>
           )}
+        </div>
+
+        {/* masks */}
+        <div className="group masks">
+          <div className="row">
+            <h2><Tip k="m_masks">Masks</Tip></h2>
+            {selMask && <button className="link" onClick={() => setMaskSel(null)}>Done</button>}
+          </div>
+          <div className="mask-add" role="group" aria-label="Add a mask">
+            {KINDS.map((k) => (
+              <button key={k.kind} className="chip" title={k.hint} onClick={() => addMask(k.kind)} disabled={!current}>
+                + {k.label}
+              </button>
+            ))}
+          </div>
+          {settings.masks.some((m) => isAi(m.kind)) && mModel && !mModel.ready && (
+            <div className="r-download">
+              <p>Person, Sky and Background masks need their engine: a one-time {mModel.size_mb} MB download. After that they work offline.</p>
+              {rDl && dlKind === "masks" ? (
+                <div className="r-progress" role="progressbar" aria-valuenow={Math.round((rDl.got / Math.max(1, rDl.total)) * 100)}>
+                  <span style={{ width: `${Math.min(100, (rDl.got / Math.max(1, rDl.total)) * 100)}%` }} />
+                  <em>{Math.round(rDl.got / 1e6)} / {Math.round(rDl.total / 1e6)} MB</em>
+                </div>
+              ) : (
+                <button className="primary" onClick={downloadMasks} disabled={!!rDl}>Download mask engine</button>
+              )}
+              {rErr && dlKind === null && <p className="r-err">{rErr}</p>}
+            </div>
+          )}
+          {settings.masks.length > 0 && (
+            <ul className="mask-list">
+              {settings.masks.map((m, i) => (
+                <li key={i} className={`${i === maskSel ? "on" : ""} ${m.enabled ? "" : "off"}`}>
+                  <button className="mask-eye" aria-label={m.enabled ? `Hide ${m.name}` : `Show ${m.name}`} title={m.enabled ? "Turn off" : "Turn on"} onClick={() => setMask(i, (x) => void (x.enabled = !x.enabled))}>
+                    {m.enabled ? "◉" : "○"}
+                  </button>
+                  <button className="mask-name" onClick={() => setMaskSel(i === maskSel ? null : i)} aria-pressed={i === maskSel}>
+                    <span className={`mask-ico k-${m.kind}`} aria-hidden />
+                    {m.name}
+                    {m.invert ? " (inverted)" : ""}
+                  </button>
+                  <button className="x" aria-label={`Delete ${m.name}`} title="Delete" onClick={() => update((s) => void s.masks.splice(i, 1))}>×</button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {selMask && maskSel !== null && (
+            <div className="mask-edit">
+              <div className="mask-opts">
+                <label className="check"><input type="checkbox" checked={maskOverlay} onChange={(e) => setMaskOverlay(e.target.checked)} /> Show mask (O)</label>
+                <label className="check"><input type="checkbox" checked={selMask.invert} onChange={(e) => setMask(maskSel, (m) => void (m.invert = e.target.checked))} /> Invert</label>
+                <button className="link" onClick={() => update((s) => void s.masks.splice(maskSel + 1, 0, { ...clone(s.masks[maskSel]), name: `${s.masks[maskSel].name} copy` }))}>Duplicate</button>
+              </div>
+              {selMask.kind === "brush" && (
+                <div className="brush-opts">
+                  <div className="seg mini" role="radiogroup" aria-label="Brush mode">
+                    <button className={!brush.erase ? "on" : ""} aria-pressed={!brush.erase} onClick={() => setBrush((b) => ({ ...b, erase: false }))}>Paint</button>
+                    <button className={brush.erase ? "on" : ""} aria-pressed={brush.erase} onClick={() => setBrush((b) => ({ ...b, erase: true }))}>Erase</button>
+                  </div>
+                  <Slider label="Size" tip="m_size" value={Math.round(brush.size * 1000) / 10} min={0.5} max={30} step={0.5} def={4} onChange={(v) => setBrush((b) => ({ ...b, size: v / 100 }))} />
+                  <Slider label="Feather" tip="m_feather" value={Math.round(brush.feather * 100)} min={0} max={100} def={60} onChange={(v) => setBrush((b) => ({ ...b, feather: v / 100 }))} />
+                  <Slider label="Flow" tip="m_flow" value={Math.round(brush.flow * 100)} min={5} max={100} def={100} onChange={(v) => setBrush((b) => ({ ...b, flow: v / 100 }))} />
+                  {selMask.strokes.length > 0 && (
+                    <button className="link" onClick={() => setMask(maskSel, (m) => void m.strokes.pop())}>Undo last stroke</button>
+                  )}
+                  {selMask.strokes.length === 0 && <p className="save-hint">Paint on the photo where you want the change.</p>}
+                </div>
+              )}
+              {selMask.kind === "radial" && (
+                <Slider label="Feather" tip="m_feather" value={Math.round(selMask.feather)} min={0} max={100} def={50} onChange={(v) => setMask(maskSel, (m) => void (m.feather = v))} />
+              )}
+              {isAi(selMask.kind) && mModel?.ready && <p className="save-hint">Found automatically. Edges follow hair and outlines.</p>}
+              <h2 className="sub">Adjust {selMask.name}</h2>
+              <Slider label="Exposure" tip="s_exposure" value={selMask.adjust.exposure} onChange={setMaskAdj("exposure")} />
+              <Slider label="Contrast" tip="s_contrast" value={selMask.adjust.contrast} onChange={setMaskAdj("contrast")} />
+              <Slider label="Highlights" tip="s_highlights" value={selMask.adjust.highlights} onChange={setMaskAdj("highlights")} />
+              <Slider label="Shadows" tip="s_shadows" value={selMask.adjust.shadows} onChange={setMaskAdj("shadows")} />
+              <Slider label="Temperature" tip="s_temp" value={selMask.adjust.temp} onChange={setMaskAdj("temp")} track="linear-gradient(90deg,#4a7fd6,#9a9a9a,#e0b040)" />
+              <Slider label="Tint" tip="s_tint" value={selMask.adjust.tint} onChange={setMaskAdj("tint")} track="linear-gradient(90deg,#4fb35a,#9a9a9a,#c450b8)" />
+              <Slider label="Saturation" tip="s_saturation" value={selMask.adjust.saturation} onChange={setMaskAdj("saturation")} />
+              <Slider label="Clarity" tip="d_clarity" value={selMask.adjust.clarity} onChange={setMaskAdj("clarity")} />
+              <Slider label="Amount" tip="m_amount" value={Math.round(selMask.amount * 100)} min={0} max={100} def={100} suffix="%" onChange={(v) => setMask(maskSel, (m) => void (m.amount = v / 100))} />
+              <button className="link" onClick={() => setMask(maskSel, (m) => void (m.adjust = freshMaskAdjust()))}>Reset this mask's sliders</button>
+            </div>
+          )}
+          {settings.masks.length === 0 && <p className="save-hint">Change one part of the photo only: brighten the person, darken the sky, warm a face.</p>}
         </div>
 
         {/* adjustments */}

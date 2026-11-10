@@ -60,6 +60,16 @@ Everything can be adjusted:
 - **Colour**: Temperature, Tint, Vibrance, Saturation
 - **Colour mix**: Hue, Saturation and Luminance for Red, Orange, Yellow, Green, Aqua, Blue, Purple and Magenta. Click a colour on the wheel to jump to it.
 
+### Masks (local adjustments)
+
+Change one part of the photo only, like Lightroom's Masking panel:
+
+- **Person**, **Sky**, **Background**: found automatically (the edges are snapped to hair and outlines).
+- **Brush**: paint where you want the change (Paint / Erase, Size, Feather, Flow; `[` and `]` change the size).
+- **Linear**: a soft graduated filter. **Radial**: a soft oval you can move, resize and turn.
+
+Each mask has its own Exposure, Contrast, Highlights, Shadows, Temperature, Tint, Saturation and Clarity, plus Invert and Amount. `O` shows the mask in red. Person / Sky / Background need a one-time 41 MB download, then work offline. Presets and "use for all photos" carry the automatic masks over; painted and placed masks stay with their own photo.
+
 Each photo keeps its own settings. **Use these settings for all photos** copies the current ones to every photo, and each photo still gets its own automatic correction.
 
 ## Saving
@@ -207,6 +217,8 @@ Because every correction is a single per-pixel transform, the on-screen preview,
 
 - Face finder: [YuNet](https://github.com/opencv/opencv_zoo) (MIT), built in.
 - Face map: BiSeNet face parsing ([face-parsing.PyTorch](https://github.com/zllrunning/face-parsing.PyTorch), MIT; ONNX from [uniface](https://huggingface.co/yakhyo/uniface-weights)), downloaded on first use. It was trained on CelebAMask-HQ, which is for non-commercial use. Check this before selling JoshGrade.
+- Person mask: [MODNet](https://github.com/ZHKKKe/MODNet) (Apache-2.0; ONNX from [Xenova/modnet](https://huggingface.co/Xenova/modnet)), downloaded on first use.
+- Sky mask: SegFormer-B0 ADE20K ([Xenova/segformer-b0-finetuned-ade-512-512](https://huggingface.co/Xenova/segformer-b0-finetuned-ade-512-512)), downloaded on first use. NVIDIA's SegFormer licence is for non-commercial use. Check this before selling JoshGrade.
 - Models run with [tract](https://github.com/sonos/tract), pure Rust.
 
 ## Limits

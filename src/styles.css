@@ -348,3 +348,30 @@ button.quiet { background: none; }
 .curve-hist { fill: rgba(255,255,255,0.07); }
 .curve-foot { display: flex; justify-content: space-between; align-items: center; margin-top: 6px; font-size: 11px; }
 .curve-foot .muted { color: var(--muted); }
+
+/* ---- masks */
+.mask-add { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 8px; }
+.mask-add .chip { font-size: 11.5px; }
+.mask-list { list-style: none; margin: 4px 0 8px; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.mask-list li { display: flex; align-items: center; gap: 4px; border-radius: 6px; padding: 1px 2px; }
+.mask-list li.on { background: rgba(255,255,255,0.07); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.12); }
+.mask-list li.off .mask-name { opacity: .5; }
+.mask-eye, .mask-list .x { background: none; border: 0; color: var(--muted); cursor: pointer; width: 24px; height: 26px; font-size: 13px; padding: 0; }
+.mask-eye:hover, .mask-list .x:hover { color: var(--text, #eee); }
+.mask-name { flex: 1; text-align: left; background: none; border: 0; color: inherit; padding: 5px 4px; cursor: pointer; display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
+.mask-ico { width: 14px; height: 14px; border-radius: 3px; flex: none; background: #444; }
+.mask-ico.k-subject { background: radial-gradient(circle at 50% 35%, #ddd 0 22%, transparent 23%), radial-gradient(ellipse at 50% 100%, #ddd 0 45%, #444 46%); }
+.mask-ico.k-sky { background: linear-gradient(#6aa8ff, #cfe3ff); }
+.mask-ico.k-background { background: radial-gradient(circle at 50% 50%, #444 0 35%, #999 36%); }
+.mask-ico.k-brush { background: radial-gradient(circle, #ddd 0 30%, #444 60%); }
+.mask-ico.k-linear { background: linear-gradient(#ddd, #444); }
+.mask-ico.k-radial { background: radial-gradient(ellipse, #ddd 0 30%, #444 70%); }
+.mask-edit { border-top: 1px solid rgba(255,255,255,0.07); margin-top: 6px; padding-top: 8px; }
+.mask-opts { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin-bottom: 6px; }
+.brush-opts { margin: 4px 0 8px; }
+.brush-opts .seg { margin-bottom: 6px; }
+.mask-canvas { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.mask-canvas .m-hdl { fill: rgba(30,30,32,.85); stroke: #fff; stroke-width: 2; vector-effect: non-scaling-stroke; cursor: grab; }
+.mask-canvas .m-hdl.centre { fill: #fff; stroke: rgba(0,0,0,.6); cursor: move; }
+.mask-canvas .m-hdl:active { cursor: grabbing; }
+.viewer.masking.m-brush { cursor: none; }

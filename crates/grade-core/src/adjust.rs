@@ -40,11 +40,13 @@ pub struct Settings {
     pub curves: crate::curves::Curves,
     /// Sharpening, noise reduction, clarity, texture, dehaze, vignette, grain.
     pub detail: crate::detail::Detail,
+    /// Local adjustments.
+    pub masks: Vec<crate::masks::Mask>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { auto: true, look: "natural".into(), strength: 1.0, adjust: Adjust::default(), retouch: Default::default(), crop: Default::default(), curves: Default::default(), detail: Default::default() }
+        Settings { auto: true, look: "natural".into(), strength: 1.0, adjust: Adjust::default(), retouch: Default::default(), crop: Default::default(), curves: Default::default(), detail: Default::default(), masks: vec![] }
     }
 }
 

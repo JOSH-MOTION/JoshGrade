@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { MaskCanvas, type Brush, type Mask } from "./Masks";
 
 export type Crop = { rot90: number; flip_h: boolean; angle: number; x: number; y: number; w: number; h: number };
 export const freshCrop = (): Crop => ({ rot90: 0, flip_h: false, angle: 0, x: 0, y: 0, w: 1, h: 1 });
@@ -60,6 +61,8 @@ export function Viewer(props: {
   split: number; setSplit: (n: number) => void; showBefore: boolean; tagL: string; tagR: string;
   fetchTile: (region: [number, number, number, number], maxPx: number, before: boolean) => Promise<string>;
   tileKey: string; zoomCmd: { n: number; to: "fit" | "100" | "in" | "out" } | null; onZoom: (z: number, z100: number) => void;
+  /** Editing a mask: draw its handles / brush on the photo. */
+  maskTool?: { mask: Mask; brush: Brush; onChange: (m: Mask) => void } | null;
 }) {
   const { W, H, crop, cropMode } = props;
   const box = useRef<HTMLDivElement>(null);
@@ -164,7 +167,23 @@ export function Viewer(props: {
     return () => clearTimeout(t);
   }, [zoom, pan.x, pan.y, props.tileKey, frameW, frameH, cropMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const layer = (src: string, tile?: Tile, extra?: string | null) => (
+  // pointer -> position in the shown (turned) photo, 0..1
+  const toImage = (clientX: number, clientY: number) => {
+    const r = box.current?.querySelector(".vframe")?.getBoundingClientRect();
+    if (!r) return [0, 0];
+    const cx = frameW / 2;
+    const cy = frameH / 2;
+    const lx = cx + (clientX - r.left - cx - pan.x) / zoom;
+    const ly = cy + (clientY - r.top - cy - pan.y) / zoom;
+    const th = (-crop.angle * Math.PI) / 180;
+    const [sn, cs] = [Math.sin(th), Math.cos(th)];
+    const ix = lx + fx * s - (W * s) / 2;
+    const iy = ly + fy * s - (H * s) / 2;
+    return [(ix * cs - iy * sn + (W * s) / 2) / (W * s), (ix * sn + iy * cs + (H * s) / 2) / (H * s)];
+  };
+  const tool = !cropMode && props.maskTool ? props.maskTool : null;
+
+  const layer = (src: string, tile?: Tile, extra?: string | null, child?: ReactNode) => (
     <div
       className="img-layer"
       style={{ left: -fx * s, top: -fy * s, width: W * s, height: H * s, transform: crop.angle ? `rotate(${crop.angle}deg)` : undefined }}
@@ -180,6 +199,7 @@ export function Viewer(props: {
         />
       )}
       {extra && <img src={extra} alt="" draggable={false} className="overlay" />}
+      {child}
     </div>
   );
   const zoomStyle = { transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` };
@@ -188,7 +208,7 @@ export function Viewer(props: {
   const onDown = (e: React.PointerEvent) => {
     const t = e.target as HTMLElement;
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    const mode = t.dataset.h ?? (cropMode ? (t.closest(".crop-rect") ? "move" : "") : zoom > 1.001 && !t.closest(".divider") ? "pan" : "split");
+    const mode = t.dataset.h ?? (cropMode ? (t.closest(".crop-rect") ? "move" : "") : zoom > 1.001 && !t.closest(".divider") ? "pan" : tool ? "" : "split");
     drag.current = { mode, x: e.clientX, y: e.clientY, c: { ...crop }, pan: { ...pan } };
     if (mode === "split") moveSplit(e.clientX);
   };
@@ -244,7 +264,7 @@ export function Viewer(props: {
 
   return (
     <div
-      className={`viewer ${cropMode ? "cropping" : ""} ${zoom > 1.001 ? "zoomed" : ""}`}
+      className={`viewer ${cropMode ? "cropping" : ""} ${zoom > 1.001 ? "zoomed" : ""} ${tool ? `masking m-${tool.mask.kind}` : ""}`}
       ref={box}
       onPointerDown={onDown}
       onPointerMove={onMove}
@@ -268,13 +288,20 @@ export function Viewer(props: {
       }}
     >
       <div className="vframe" style={{ width: frameW, height: frameH }}>
-        <div className="zoom-wrap" style={zoomStyle}>{layer(props.after, tiles.after, props.overlay)}</div>
-        {!cropMode && (
+        <div className="zoom-wrap" style={zoomStyle}>
+          {layer(
+            props.after,
+            tiles.after,
+            props.overlay,
+            tool && <MaskCanvas mask={tool.mask} brush={tool.brush} onChange={tool.onChange} Ws={W * s} Hs={H * s} turn={{ rot: crop.rot90, flip: crop.flip_h }} zoom={zoom} toImage={toImage} />,
+          )}
+        </div>
+        {!cropMode && (!tool || props.showBefore) && (
           <div className="before-clip" style={{ clipPath: props.showBefore ? "none" : `inset(0 ${100 - props.split}% 0 0)` }}>
             <div className="zoom-wrap" style={zoomStyle}>{layer(props.before, tiles.before)}</div>
           </div>
         )}
-        {!cropMode && !props.showBefore && (
+        {!cropMode && !tool && !props.showBefore && (
           <div className="divider" style={{ left: `${props.split}%` }} role="slider" tabIndex={0} aria-label="Before and after divider" aria-valuenow={Math.round(props.split)}
             onKeyDown={(e) => {
               if (e.key === "ArrowLeft") props.setSplit(Math.max(0, props.split - 5));
@@ -283,8 +310,8 @@ export function Viewer(props: {
             <span className="knob" />
           </div>
         )}
-        {!cropMode && <span className="tag tag-l">{props.tagL}</span>}
-        {!cropMode && !props.showBefore && <span className="tag tag-r">{props.tagR}</span>}
+        {!cropMode && !tool && <span className="tag tag-l">{props.tagL}</span>}
+        {!cropMode && !tool && !props.showBefore && <span className="tag tag-r">{props.tagR}</span>}
         {cropMode && (
           <div className="crop-ui">
             <div className="crop-rect" style={{ left: crop.x * W * s, top: crop.y * H * s, width: crop.w * W * s, height: crop.h * H * s }}>
