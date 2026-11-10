@@ -24,6 +24,14 @@ fn main() {
             }
             "--lut" => write_lut = true,
             "--retouch" => settings.retouch.enabled = true,
+            // full settings as JSON (what the app sends), e.g. --settings '{"detail":{"clarity":40}}'
+            "--settings" => {
+                let j = args.next().unwrap_or_default();
+                settings = serde_json::from_str(&j).unwrap_or_else(|e| {
+                    eprintln!("bad --settings JSON: {e}");
+                    std::process::exit(2)
+                });
+            }
             "--no-auto" => settings.auto = false,
             "--smooth" => settings.retouch.smooth = args.next().and_then(|s| s.parse().ok()).unwrap_or(0.45),
             "--looks" => {

@@ -14,6 +14,8 @@ pub struct Adjust {
     pub tint: f32,
     pub vibrance: f32,
     pub saturation: f32,
+    pub whites: f32,
+    pub blacks: f32,
     /// Colour mixer, one entry per band (Red, Orange, Yellow, Green, Aqua, Blue, Purple, Magenta).
     pub hue: [f32; 8],
     pub sat: [f32; 8],
@@ -34,11 +36,15 @@ pub struct Settings {
     pub retouch: crate::RetouchSettings,
     /// Crop, rotate, straighten.
     pub crop: crate::geometry::Crop,
+    /// Point curves.
+    pub curves: crate::curves::Curves,
+    /// Sharpening, noise reduction, clarity, texture, dehaze, vignette, grain.
+    pub detail: crate::detail::Detail,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { auto: true, look: "natural".into(), strength: 1.0, adjust: Adjust::default(), retouch: Default::default(), crop: Default::default() }
+        Settings { auto: true, look: "natural".into(), strength: 1.0, adjust: Adjust::default(), retouch: Default::default(), crop: Default::default(), curves: Default::default(), detail: Default::default() }
     }
 }
 
@@ -52,6 +58,8 @@ impl Adjust {
     pub fn tint_amt(&self) -> f32 { self.tint / 250.0 } // ±0.4
     pub fn vibrance_amt(&self) -> f32 { self.vibrance / 160.0 } // ±0.6
     pub fn saturation_amt(&self) -> f32 { self.saturation / 100.0 } // ±1 (−100 = mono)
+    pub fn whites_amt(&self) -> f32 { self.whites / 400.0 } // ±0.25
+    pub fn blacks_amt(&self) -> f32 { self.blacks / 400.0 } // ±0.25
     pub fn band_hue_deg(&self, i: usize) -> f32 { self.hue[i] * 0.3 } // ±30°
     pub fn band_sat(&self, i: usize) -> f32 { self.sat[i] / 100.0 } // ×(1 ± 1)
     pub fn band_lum(&self, i: usize) -> f32 { self.lum[i] / 400.0 } // ±0.25
@@ -76,6 +84,9 @@ pub fn auto_sliders(p: &crate::AutoParams) -> Adjust {
         tint: r(tint * 250.0),
         vibrance: r(p.vibrance * 160.0),
         saturation: r(p.saturation * 100.0),
+        // the automatic black / white points show on Blacks / Whites
+        whites: r((1.0 - p.white) * 400.0),
+        blacks: r(-p.black * 400.0),
         hue: [0.0; 8],
         sat: p.hsl_sat.map(|v| r((v - 1.0) * 100.0)),
         lum: p.hsl_lum.map(|v| r(v * 400.0)),

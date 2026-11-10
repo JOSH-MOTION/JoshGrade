@@ -6,16 +6,25 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { ColorWheel, Histogram, ScopeData, bandColor } from "./Scopes";
 import { Tip } from "./Tip";
+import { CurveEditor, Curves, freshCurves } from "./CurveEditor";
 import { Crop, cropActive, cropToAspect, fitCrop, freshCrop, Viewer } from "./Viewer";
 
 type Look = { id: string; name: string; description: string };
 type Adjust = {
   exposure: number; contrast: number; highlights: number; shadows: number;
-  temp: number; tint: number; vibrance: number; saturation: number;
+  temp: number; tint: number; vibrance: number; saturation: number; whites: number; blacks: number;
   hue: number[]; sat: number[]; lum: number[];
 };
+type Detail = {
+  sharpen: number; sharpen_radius: number; sharpen_masking: number; noise: number; color_noise: number;
+  texture: number; clarity: number; dehaze: number; vignette: number; vignette_midpoint: number; vignette_feather: number; grain: number; grain_size: number;
+};
+const freshDetail = (): Detail => ({
+  sharpen: 0, sharpen_radius: 1, sharpen_masking: 0, noise: 0, color_noise: 0, texture: 0, clarity: 0, dehaze: 0,
+  vignette: 0, vignette_midpoint: 50, vignette_feather: 50, grain: 0, grain_size: 25,
+});
 type Retouch = { enabled: boolean; blemishes: number; smooth: number; even: number; shine: number; keep_moles: boolean; keep_freckles: boolean };
-type Settings = { auto: boolean; look: string; strength: number; adjust: Adjust; retouch: Retouch; crop: Crop };
+type Settings = { auto: boolean; look: string; strength: number; adjust: Adjust; retouch: Retouch; crop: Crop; curves: Curves; detail: Detail };
 type ReportLine = { key: string; label: string; before: string; after: string; verdict: string; status: "good" | "warn" | "info" };
 type Photo = { path: string; name: string; thumb?: string; saved?: string; error?: string };
 type Preview = {
@@ -32,11 +41,11 @@ const BANDS = [
 ];
 const ZERO8 = () => [0, 0, 0, 0, 0, 0, 0, 0];
 const freshAdjust = (): Adjust => ({
-  exposure: 0, contrast: 0, highlights: 0, shadows: 0, temp: 0, tint: 0, vibrance: 0, saturation: 0,
+  exposure: 0, contrast: 0, highlights: 0, shadows: 0, temp: 0, tint: 0, vibrance: 0, saturation: 0, whites: 0, blacks: 0,
   hue: ZERO8(), sat: ZERO8(), lum: ZERO8(),
 });
 const freshRetouch = (): Retouch => ({ enabled: false, blemishes: 1, smooth: 0.45, even: 0.5, shine: 0.35, keep_moles: true, keep_freckles: true });
-const freshSettings = (): Settings => ({ auto: true, look: "natural", strength: 1, adjust: freshAdjust(), retouch: freshRetouch(), crop: freshCrop() });
+const freshSettings = (): Settings => ({ auto: true, look: "natural", strength: 1, adjust: freshAdjust(), retouch: freshRetouch(), crop: freshCrop(), curves: freshCurves(), detail: freshDetail() });
 const clone = (s: Settings): Settings => JSON.parse(JSON.stringify(s));
 
 const EXTENSIONS = [
@@ -78,22 +87,23 @@ function Amount({ label, tip, value, def, onChange }: { label: string; tip: stri
 
 /** A slider that shows auto + your change. `auto` is what JoshGrade chose; moving the slider
  *  stores only your change on top, so the auto grade is never lost. */
-function Slider({ label, tip, value, auto = 0, onChange, min = -100, max = 100, track, suffix = "", step = 1 }: {
+function Slider({ label, tip, value, auto = 0, onChange, min = -100, max = 100, track, suffix = "", step = 1, def }: {
   label: string; tip?: string; value: number; auto?: number; onChange: (offset: number) => void;
-  min?: number; max?: number; track?: string; suffix?: string; step?: number;
+  min?: number; max?: number; track?: string; suffix?: string; step?: number; def?: number;
 }) {
   const id = `s-${label.replace(/\W/g, "")}-${tip ?? ""}`;
   const shown = Math.max(min, Math.min(max, auto + value));
-  const reset = () => onChange(min < 0 ? 0 : 100 - auto);
+  const reset = () => onChange(def !== undefined ? def : min < 0 ? 0 : 100 - auto);
   const autoPos = ((Math.max(min, Math.min(max, auto)) - min) / (max - min)) * 100;
   const fmt = (v: number) => `${v > 0 && min < 0 ? "+" : ""}${step < 1 ? v.toFixed(1) : Math.round(v)}${suffix}`;
+  const changed = def !== undefined ? Math.abs(value - def) > 1e-6 : value !== 0;
   return (
     <div className="slider">
       <div className="slider-head">
         <label htmlFor={id} onDoubleClick={reset} title="Double-click to go back to auto">
           {tip ? <Tip k={tip}>{label}</Tip> : label}
         </label>
-        <output className={value !== 0 ? "changed" : auto !== 0 ? "auto" : ""}>
+        <output className={changed ? "changed" : auto !== 0 ? "auto" : ""}>
           {fmt(shown)}
           {auto !== 0 && value === 0 && <span className="auto-tag">auto</span>}
           {value !== 0 && auto !== 0 && <span className="auto-tag">auto {fmt(auto)}</span>}
@@ -161,7 +171,14 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
 
   const current = photos[selected] as Photo | undefined;
   const stored: Settings = (current && settingsMap[current.path]) || lastUsed;
-  const settings: Settings = { ...stored, retouch: stored.retouch ?? freshRetouch(), crop: stored.crop ?? freshCrop() };
+  const settings: Settings = {
+    ...stored,
+    adjust: { ...freshAdjust(), ...stored.adjust },
+    retouch: stored.retouch ?? freshRetouch(),
+    crop: stored.crop ?? freshCrop(),
+    curves: stored.curves ?? freshCurves(),
+    detail: { ...freshDetail(), ...stored.detail },
+  };
   // Retouch engine: the face map model is downloaded once, then everything runs offline.
   const [rModel, setRModel] = useState<{ ready: boolean; size_mb: number } | null>(null);
   const [rDl, setRDl] = useState<{ got: number; total: number } | null>(null);
@@ -212,7 +229,7 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
       }
       setSettingsMap((m) => {
         const prev = m[current.path] ?? lastUsed;
-        const s = clone(prev);
+        const s = clone({ ...prev, adjust: { ...freshAdjust(), ...prev.adjust }, curves: prev.curves ?? freshCurves(), detail: { ...freshDetail(), ...prev.detail }, crop: prev.crop ?? freshCrop(), retouch: prev.retouch ?? freshRetouch() });
         fn(s);
         if (JSON.stringify(s) === JSON.stringify(prev)) return m;
         remember(current.path, prev);
@@ -281,6 +298,7 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
   };
   const applyPreset = (pr: Preset) => update((s) => void Object.assign(s, { ...clone(pr.settings), crop: s.crop }));
   const setAdj = (key: keyof Omit<Adjust, "hue" | "sat" | "lum">) => (v: number) => update((s) => void (s.adjust[key] = v));
+  const setDet = (key: keyof Detail) => (v: number) => update((s) => void (s.detail[key] = v));
   const setBandAdj = (key: "hue" | "sat" | "lum") => (v: number) => update((s) => void (s.adjust[key][band] = v));
 
   // ---------- adding photos
@@ -844,12 +862,25 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
           <Slider label="Contrast" tip="s_contrast" value={a.contrast} auto={auto.contrast} onChange={setAdj("contrast")} />
           <Slider label="Highlights" tip="s_highlights" value={a.highlights} auto={auto.highlights} onChange={setAdj("highlights")} />
           <Slider label="Shadows" tip="s_shadows" value={a.shadows} auto={auto.shadows} onChange={setAdj("shadows")} />
+          <Slider label="Whites" tip="s_whites" value={a.whites} auto={auto.whites ?? 0} onChange={setAdj("whites")} />
+          <Slider label="Blacks" tip="s_blacks" value={a.blacks} auto={auto.blacks ?? 0} onChange={setAdj("blacks")} />
+          <h2 className="sub">Presence</h2>
+          <Slider label="Texture" tip="d_texture" value={settings.detail.texture} onChange={setDet("texture")} />
+          <Slider label="Clarity" tip="d_clarity" value={settings.detail.clarity} onChange={setDet("clarity")} />
+          <Slider label="Dehaze" tip="d_dehaze" value={settings.detail.dehaze} onChange={setDet("dehaze")} />
           <h2 className="sub">Colour</h2>
           <Slider label="Temperature" tip="s_temp" value={a.temp} auto={auto.temp} onChange={setAdj("temp")} track="linear-gradient(90deg,#4a7fd6,#9a9a9a,#e0b040)" />
           <Slider label="Tint" tip="s_tint" value={a.tint} auto={auto.tint} onChange={setAdj("tint")} track="linear-gradient(90deg,#4fb35a,#9a9a9a,#c450b8)" />
           <Slider label="Vibrance" tip="s_vibrance" value={a.vibrance} auto={auto.vibrance} onChange={setAdj("vibrance")} />
           <Slider label="Saturation" tip="s_saturation" value={a.saturation} onChange={setAdj("saturation")} />
           {adjusted && <button className="link reset-link" onClick={resetAdjust}>Back to auto (undo my changes)</button>}
+        </div>
+
+        <div className="group">
+          <div className="row">
+            <h2><Tip k="t_curve">Tone curve</Tip></h2>
+          </div>
+          <CurveEditor curves={settings.curves} onChange={(c) => update((s) => void (s.curves = c))} histogram={showing?.scopes_after.hist_l} />
         </div>
 
         <div className="group">
@@ -898,6 +929,30 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
             </ul>
           </div>
         )}
+
+        {/* detail + effects */}
+        <div className="group">
+          <h2>Detail</h2>
+          <h2 className="sub">Sharpening</h2>
+          <Slider label="Amount" tip="d_sharpen" value={settings.detail.sharpen} min={0} max={150} def={0} onChange={setDet("sharpen")} />
+          <Slider label="Radius" tip="d_radius" value={settings.detail.sharpen_radius} min={0.5} max={3} step={0.1} def={1} onChange={setDet("sharpen_radius")} />
+          <Slider label="Masking" tip="d_masking" value={settings.detail.sharpen_masking} min={0} max={100} def={0} onChange={setDet("sharpen_masking")} />
+          <h2 className="sub">Noise reduction</h2>
+          <Slider label="Luminance" tip="d_noise" value={settings.detail.noise} min={0} max={100} def={0} onChange={setDet("noise")} />
+          <Slider label="Colour" tip="d_cnoise" value={settings.detail.color_noise} min={0} max={100} def={0} onChange={setDet("color_noise")} />
+          <p className="save-hint">Zoom to 100% (Z) to judge sharpening and noise.</p>
+        </div>
+
+        <div className="group">
+          <h2>Effects</h2>
+          <h2 className="sub">Vignette</h2>
+          <Slider label="Amount" tip="d_vignette" value={settings.detail.vignette} onChange={setDet("vignette")} />
+          <Slider label="Midpoint" tip="d_vmid" value={settings.detail.vignette_midpoint} min={0} max={100} def={50} onChange={setDet("vignette_midpoint")} />
+          <Slider label="Feather" tip="d_vfeather" value={settings.detail.vignette_feather} min={0} max={100} def={50} onChange={setDet("vignette_feather")} />
+          <h2 className="sub">Grain</h2>
+          <Slider label="Amount" tip="d_grain" value={settings.detail.grain} min={0} max={100} def={0} onChange={setDet("grain")} />
+          <Slider label="Size" tip="d_gsize" value={settings.detail.grain_size} min={0} max={100} def={25} onChange={setDet("grain_size")} />
+        </div>
 
         {/* saving */}
         <div className="group export">

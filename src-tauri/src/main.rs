@@ -209,8 +209,13 @@ async fn preview(state: St<'_>, path: String, settings: Settings, with_before: b
         let cr = settings.crop;
         let turned = cr.rot90 % 4 != 0 || cr.flip_h;
         let after = grade.apply(base.as_deref().unwrap_or(&e.photo));
+        // detail at preview scale (sharpening only shows at 100% zoom, like Lightroom)
+        let k = e.photo.width.max(e.photo.height) as f32 / e.full_dims.0.max(e.full_dims.1).max(1) as f32;
+        let after = grade_core::detail::apply(&after, &settings.detail, k);
         // Quarter turns are applied here; straighten + crop are shown by the viewer.
         let after = geometry::turn(&after, cr.rot90, cr.flip_h);
+        let frame = grade_core::detail::Frame::of_crop(&cr, after.width as f32, after.height as f32);
+        let after = grade_core::detail::finish_frame(&after, &settings.detail, &frame, k);
         let overlay = if clipping { Some(png_url(&scopes::clipping_overlay(&after))?) } else { None };
         let (fw, fh) = if cr.rot90 % 2 == 1 { (e.full_dims.1, e.full_dims.0) } else { e.full_dims };
         Ok(PreviewResult {
@@ -283,9 +288,20 @@ async fn preview_region(state: St<'_>, path: String, settings: Settings, region:
         }
         if !before {
             let grade = grade_core::grade_with(&e.analysis, &settings).map_err(|e| e.to_string())?;
-            piece = grade.apply(&piece);
+            piece = grade_core::detail::apply(&grade.apply(&piece), &settings.detail, 1.0);
         }
         let mut piece = geometry::turn(&piece, cr.rot90, cr.flip_h);
+        if !before && settings.detail.framed() {
+            // vignette / grain measured on the whole crop frame, shifted to this piece
+            let (tw, th) = if cr.rot90 % 2 == 1 { (base.height as f32, base.width as f32) } else { (base.width as f32, base.height as f32) };
+            let mut f = grade_core::detail::Frame::of_crop(&cr, tw, th);
+            let (ox, oy) = (rx.clamp(0.0, 1.0) * tw, ry.clamp(0.0, 1.0) * th);
+            f.cx -= ox;
+            f.cy -= oy;
+            f.px -= ox;
+            f.py -= oy;
+            piece = grade_core::detail::finish_frame(&piece, &settings.detail, &f, 1.0);
+        }
         if piece.width.max(piece.height) > max_px {
             piece = shrink(&piece, max_px);
         }

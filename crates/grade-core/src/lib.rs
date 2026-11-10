@@ -9,7 +9,9 @@ pub mod adjust;
 pub mod analyze;
 pub mod camera;
 pub mod color;
+pub mod curves;
 pub mod decode;
+pub mod detail;
 pub mod encode;
 pub mod geometry;
 pub mod grade;
@@ -70,7 +72,7 @@ pub struct SaveResult {
 pub fn grade_with(analysis: &Analysis, settings: &Settings) -> Result<Grade, Error> {
     let look = find_look(&settings.look).ok_or_else(|| Error::UnknownLook(settings.look.clone()))?;
     let auto = if settings.auto { analysis.params } else { AutoParams::identity() };
-    Ok(Grade::with_adjust(&auto, &look.params, &settings.adjust, settings.strength))
+    Ok(Grade::with_adjust(&auto, &look.params, &settings.adjust, settings.strength).with_curves(&settings.curves))
 }
 
 /// Analyse a photo (from a reduced copy) and build its grade.
@@ -128,9 +130,13 @@ pub fn save_graded(input: &Path, output: &Path, settings: &Settings, format: Out
     Ok(SaveResult { input: input.to_path_buf(), output: output.to_path_buf(), lut, notes: analysis.notes })
 }
 
-/// Everything after the colour grade: detail, crop. (Same for preview and save.)
+/// Everything after the colour grade, for a full-resolution save: detail (sharpening,
+/// noise reduction, clarity…), then the crop, then vignette and grain on the final frame.
 pub fn finish(p: &Photo, settings: &Settings) -> Photo {
-    geometry::apply(p, &settings.crop)
+    let d = &settings.detail;
+    let p = detail::apply(p, d, 1.0);
+    let p = geometry::apply(&p, &settings.crop);
+    detail::finish_frame(&p, d, &detail::Frame::whole(), 1.0)
 }
 
 /// Collect supported photos from files and folders (folders are scanned up to 3 levels deep).

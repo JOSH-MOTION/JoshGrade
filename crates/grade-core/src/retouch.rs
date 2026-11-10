@@ -140,23 +140,23 @@ fn parser() -> Result<Plan, RetouchError> {
 
 /// One channel of floats.
 #[derive(Clone)]
-struct Plane {
-    w: usize,
-    h: usize,
-    d: Vec<f32>,
+pub(crate) struct Plane {
+    pub(crate) w: usize,
+    pub(crate) h: usize,
+    pub(crate) d: Vec<f32>,
 }
 
 impl Plane {
-    fn new(w: usize, h: usize, v: f32) -> Plane {
+    pub(crate) fn new(w: usize, h: usize, v: f32) -> Plane {
         Plane { w, h, d: vec![v; w * h] }
     }
-    fn map(&self, f: impl Fn(f32) -> f32 + Sync) -> Plane {
+    pub(crate) fn map(&self, f: impl Fn(f32) -> f32 + Sync) -> Plane {
         Plane { w: self.w, h: self.h, d: self.d.par_iter().map(|&v| f(v)).collect() }
     }
-    fn zip(&self, o: &Plane, f: impl Fn(f32, f32) -> f32 + Sync) -> Plane {
+    pub(crate) fn zip(&self, o: &Plane, f: impl Fn(f32, f32) -> f32 + Sync) -> Plane {
         Plane { w: self.w, h: self.h, d: self.d.par_iter().zip(&o.d).map(|(&a, &b)| f(a, b)).collect() }
     }
-    fn at(&self, x: usize, y: usize) -> f32 {
+    pub(crate) fn at(&self, x: usize, y: usize) -> f32 {
         self.d[y * self.w + x]
     }
 }
@@ -207,7 +207,7 @@ fn transpose(src: &[f32], w: usize, h: usize) -> Vec<f32> {
     out
 }
 
-fn blur(p: &Plane, sigma: f32) -> Plane {
+pub(crate) fn blur(p: &Plane, sigma: f32) -> Plane {
     if sigma < 0.4 {
         return p.clone();
     }
@@ -229,7 +229,7 @@ fn blur(p: &Plane, sigma: f32) -> Plane {
 }
 
 /// Blur that only listens to pixels with weight `wt` (normalised convolution).
-fn norm_blur(p: &Plane, wt: &Plane, sigma: f32) -> Plane {
+pub(crate) fn norm_blur(p: &Plane, wt: &Plane, sigma: f32) -> Plane {
     let num = blur(&p.zip(wt, |a, b| a * b), sigma);
     let den = blur(wt, sigma);
     num.zip(&den, |n, d| n / d.max(1e-4))
@@ -247,7 +247,7 @@ fn masked_median(p: &Plane, mask: &Plane, t: f32) -> f32 {
 }
 
 /// Area-average downscale by an integer-ish factor (for fast analysis).
-fn shrink(p: &Plane, k: f32) -> Plane {
+pub(crate) fn shrink(p: &Plane, k: f32) -> Plane {
     if k >= 0.999 {
         return p.clone();
     }
@@ -273,7 +273,7 @@ fn shrink(p: &Plane, k: f32) -> Plane {
     Plane { w, h, d }
 }
 
-fn sample(p: &Plane, fx: f32, fy: f32) -> f32 {
+pub(crate) fn sample(p: &Plane, fx: f32, fy: f32) -> f32 {
     let fx = fx.clamp(0.0, (p.w - 1) as f32);
     let fy = fy.clamp(0.0, (p.h - 1) as f32);
     let (x0, y0) = (fx.floor() as usize, fy.floor() as usize);

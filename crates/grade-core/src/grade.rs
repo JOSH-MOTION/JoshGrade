@@ -29,6 +29,8 @@ pub struct Grade {
     fade: f32,
     roll: f32,
     strength: f32,
+    /// Your point curves (master, R, G, B) as lookup tables; None = straight.
+    user: Option<Box<crate::curves::Tables>>,
 }
 
 impl Grade {
@@ -52,6 +54,7 @@ impl Grade {
         let shadows = (auto.shadows + look.shadows + adj.shadows_amt()).clamp(-0.4, 0.6);
         let contrast = (auto.contrast + look.contrast + adj.contrast_amt()).clamp(-0.5, 0.6);
         let highlights = adj.highlights_amt();
+        let (whites, blacks) = (adj.whites_amt(), adj.blacks_amt());
         // Pulling highlights down also moves the shoulder lower for a gentler roll-off.
         let knee = (auto.highlight_knee + highlights.min(0.0) * 0.4).clamp(0.5, 0.95);
 
@@ -67,6 +70,8 @@ impl Grade {
                     x += highlights * 2.5 * x.powi(3) * (1.0 - x);
                     // 4. contrast S-curve pivoting on mid-grey
                     x += contrast * 4.0 * (x - x * x) * (x - 0.5);
+                    // 5. whites / blacks: move the ends of the range
+                    x += whites * 1.6 * x.powi(4) + blacks * 1.6 * (1.0 - x).powi(4);
                     x = x.max(0.0);
                 }
                 // 5. highlight shoulder – smooth roll-off instead of clipping
@@ -103,7 +108,14 @@ impl Grade {
             fade: look.fade,
             roll: if look.roll <= 0.0 { 1.0 } else { look.roll },
             strength: strength.clamp(0.0, 2.0),
+            user: None,
         }
+    }
+
+    /// Add your point curves (applied after everything else in the grade).
+    pub fn with_curves(mut self, c: &crate::curves::Curves) -> Self {
+        self.user = c.tables().map(Box::new);
+        self
     }
 
     #[inline]
@@ -199,6 +211,9 @@ impl Grade {
             }
         }
 
+        if let Some(t) = &self.user {
+            c = t.apply(c.map(|v| v.clamp(0.0, 1.0)));
+        }
         // Film-style output range (faded blacks / soft whites).
         let out = c.map(|v| (self.fade + v.clamp(0.0, 1.0) * (self.roll - self.fade)).clamp(0.0, 1.0));
 
