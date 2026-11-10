@@ -9,7 +9,7 @@ import { CaptionView, Template, TemplateTile } from "./CaptionTemplates";
 // ---------------------------------------------------------------- types
 type MediaInfo = {
   path: string; duration: number; has_video: boolean; has_audio: boolean; width: number; height: number;
-  fps_num: number; fps_den: number; audio_channels: number; sample_rate: number; timecode: string | null;
+  fps_num: number; fps_den: number; audio_channels: number; sample_rate: number; timecode: string | null; start_epoch?: number | null;
 };
 type Item = { path: string; kind: "video" | "audio"; info?: MediaInfo | null; error?: string | null };
 type Confidence = "high" | "medium" | "low" | "none";
@@ -18,7 +18,7 @@ type Match = {
   confidence: Confidence; overlap: number; clip_info: MediaInfo; envelope: number[];
 };
 type Reference = { path: string; info: MediaInfo; envelope: number[] };
-type Report = { references: Reference[]; matches: Match[] };
+type Report = { references: Reference[]; matches: Match[]; positions?: number[] };
 type Word = { text: string; start: number; end: number; prob: number };
 type Cue = { start: number; end: number; text: string; words: Word[] };
 type Transcript = { language: string; duration: number; words: Word[] };
@@ -510,7 +510,7 @@ export default function VideoApp({ modeSwitch, active }: { modeSwitch?: ReactNod
                   <button className="primary wide" disabled={!synced.length || render?.running} onClick={saveSynced}>Save synced videos…</button>
                   <p className="save-hint">New files with the recorder's sound laid in. The picture is copied untouched, so there's no quality loss and it's fast.</p>
                   <button className="wide" disabled={!synced.length} onClick={saveTimeline}>Export timeline for Premiere / DaVinci…</button>
-                  <p className="save-hint">An XML timeline with every clip already in place over the recorder audio. Premiere: File › Import. DaVinci Resolve: File › Import › Timeline.</p>
+                  <p className="save-hint">One XML timeline with every clip and every recorder file already in place. Premiere: File › Import. DaVinci Resolve: File › Import › Timeline.</p>
                 </div>
               </>
             ) : (
@@ -753,58 +753,78 @@ export default function VideoApp({ modeSwitch, active }: { modeSwitch?: ReactNod
 
 // ---------------------------------------------------------------- sync timeline
 function SyncTimeline({ report, selected, onSelect }: { report: Report; selected: string | null; onSelect: (p: string) => void }) {
+  // One shared timeline, laid out exactly like the exported XML.
+  const pos = report.references.map((_, i) => report.positions?.[i] ?? 0);
+  const refIdx = (p: string | null) => report.references.findIndex((r) => r.path === p);
+  const items = report.matches
+    .filter((m) => m.reference && refIdx(m.reference) >= 0 && !(m.clip === m.reference && !m.clip_info.has_video))
+    .map((m) => ({ m, start: pos[refIdx(m.reference)] + m.offset, dur: m.clip_info.duration }));
+  const recs = report.references
+    .map((r, i) => ({ r, start: pos[i], dur: r.info.duration }))
+    .filter((x) => !x.r.info.has_video);
+  const all = [...items, ...recs];
+  const t0 = Math.min(0, ...all.map((x) => x.start));
+  const t1 = Math.max(1, ...all.map((x) => x.start + x.dur));
+  const span = Math.max(1, t1 - t0);
+  const x = (t: number) => `${((t - t0) / span) * 100}%`;
+  const w = (d: number) => `${(d / span) * 100}%`;
+  // overlapping things get their own row
+  function lanesOf<T extends { start: number; dur: number }>(list: T[]) {
+    const lanes: T[][] = [];
+    [...list].sort((a, b) => a.start - b.start).forEach((it) => {
+      const lane = lanes.find((l) => l[l.length - 1].start + l[l.length - 1].dur <= it.start + 1e-6);
+      if (lane) lane.push(it);
+      else lanes.push([it]);
+    });
+    return lanes;
+  }
+  const clipLanes = lanesOf(items);
+  const recLanes = lanesOf(recs);
+  const tick = [5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600].find((s) => span / s <= 10) ?? 3600;
+  const ticks: number[] = [];
+  for (let t = 0; t <= span; t += tick) ticks.push(t);
+  const several = recs.length > 1;
   return (
     <div className="timelines">
-      {report.references.map((r) => {
-        const ms = report.matches.filter((m) => m.reference === r.path && m.clip !== r.path);
-        const t0 = Math.min(0, ...ms.map((m) => m.offset));
-        const t1 = Math.max(r.info.duration, ...ms.map((m) => m.offset + m.clip_info.duration));
-        const span = Math.max(1, t1 - t0);
-        const x = (t: number) => `${((t - t0) / span) * 100}%`;
-        const w = (d: number) => `${(d / span) * 100}%`;
-        // lanes: overlapping clips get their own row
-        const lanes: Match[][] = [];
-        [...ms].sort((a, b) => a.offset - b.offset).forEach((m) => {
-          const lane = lanes.find((l) => l[l.length - 1].offset + l[l.length - 1].clip_info.duration <= m.offset);
-          if (lane) lane.push(m);
-          else lanes.push([m]);
-        });
-        const tick = [5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600].find((s) => span / s <= 10) ?? 3600;
-        const ticks: number[] = [];
-        for (let t = Math.ceil(t0 / tick) * tick; t <= t1; t += tick) ticks.push(t);
-        return (
-          <section key={r.path} className="tl">
-            <div className="tl-ruler">
-              {ticks.map((t) => (
-                <span key={t} style={{ left: x(t) }}>{fmtDur(t)}</span>
-              ))}
-            </div>
-            <div className="tl-lane ref">
-              <div className="tl-clip ref" style={{ left: x(0), width: w(r.info.duration) }} title={r.path}>
+      <section className="tl">
+        <div className="tl-ruler">
+          {ticks.map((t) => (
+            <span key={t} style={{ left: x(t + t0) }}>{fmtDur(t)}</span>
+          ))}
+        </div>
+        {clipLanes.map((lane, li) => (
+          <div key={`v${li}`} className="tl-lane">
+            {lane.map(({ m, start, dur }) => (
+              <button
+                key={m.clip}
+                className={`tl-clip c-${m.confidence} ${selected === m.clip ? "on" : ""}`}
+                style={{ left: x(start), width: w(dur) }}
+                onClick={() => onSelect(m.clip)}
+                title={`${baseName(m.clip)}: starts ${fmtTime(m.offset)} into ${baseName(m.reference ?? "")}`}
+              >
+                <Wave env={m.envelope} color="rgba(140,180,255,0.7)" />
+                <span className="tl-label">▶ {baseName(m.clip)}</span>
+              </button>
+            ))}
+          </div>
+        ))}
+        {recLanes.map((lane, li) => (
+          <div key={`r${li}`} className="tl-lane ref">
+            {lane.map(({ r, start, dur }) => (
+              <div
+                key={r.path}
+                className="tl-clip ref"
+                style={{ left: x(start), width: w(dur) }}
+                title={`${r.path}${r.info.start_epoch ? `\nRecorded at ${new Date(r.info.start_epoch * 1000).toISOString().slice(11, 19)} (from the file)` : ""}`}
+              >
                 <Wave env={r.envelope} color="rgba(120,200,140,0.75)" />
                 <span className="tl-label">♪ {baseName(r.path)}</span>
               </div>
-            </div>
-            {lanes.map((lane, li) => (
-              <div key={li} className="tl-lane">
-                {lane.map((m) => (
-                  <button
-                    key={m.clip}
-                    className={`tl-clip c-${m.confidence} ${selected === m.clip ? "on" : ""}`}
-                    style={{ left: x(m.offset), width: w(m.clip_info.duration) }}
-                    onClick={() => onSelect(m.clip)}
-                    title={`${baseName(m.clip)}: starts at ${fmtTime(m.offset)}`}
-                  >
-                    <Wave env={m.envelope} color="rgba(140,180,255,0.7)" />
-                    <span className="tl-label">▶ {baseName(m.clip)}</span>
-                  </button>
-                ))}
-              </div>
             ))}
-            {ms.length === 0 && <p className="tl-none">No clips matched this recording.</p>}
-          </section>
-        );
-      })}
+          </div>
+        ))}
+        {items.length === 0 && <p className="tl-none">No clips matched the recording.</p>}
+      </section>
       {report.matches.some((m) => !m.reference) && (
         <section className="tl-unmatched">
           <h3>Couldn't match</h3>
@@ -817,7 +837,10 @@ function SyncTimeline({ report, selected, onSelect }: { report: Report; selected
           </ul>
         </section>
       )}
-      <p className="tl-help">Each clip sits where its sound matches the recording. Green bar = recorder; blue = camera clips. A yellow edge means "check it".</p>
+      <p className="tl-help">
+        Each clip sits where its sound matches the recording — this is the same single timeline you get in Premiere / DaVinci.
+        Green = recorder{several ? " files, placed by the time each one started recording (files without a time follow on in order)" : ""}; blue = camera clips. A yellow edge means "check it".
+      </p>
     </div>
   );
 }

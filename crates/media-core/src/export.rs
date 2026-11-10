@@ -138,115 +138,186 @@ fn file_xml(id: &str, info: &MediaInfo, tb: u32, ntsc: bool, fps: f64, defined: 
     s
 }
 
-/// Build an FCP7-style XML (xmeml v4) with one synced sequence per recorder file.
-/// Cameras go on V1, V2… (overlapping clips get their own track), camera sound on matching
-/// audio tracks, and the recorder on the track below them.
+/// Where each recorder file sits on the one shared timeline (seconds from the timeline's
+/// zero, before shifting so nothing starts below 0). Recorder files with a start time are
+/// laid out by the clock (so two recorders running together overlap, like a lav and a boom);
+/// a long pause between takes is shortened to a 10 s gap, and files without a start time
+/// follow on in the order they were added.
+pub fn reference_layout(matches: &[Match], references: &[crate::sync::Reference]) -> Vec<f64> {
+    const GAP: f64 = 10.0;
+    const MAX_REAL_GAP: f64 = 300.0;
+    // Each reference's span relative to its own start, including clips that start before or run past it.
+    let span = |r: &crate::sync::Reference| {
+        let mut lo = 0.0f64;
+        let mut hi = r.info.duration;
+        for m in matches.iter().filter(|m| m.reference.as_deref() == Some(r.path.as_str())) {
+            lo = lo.min(m.offset);
+            hi = hi.max(m.offset + m.clip_info.duration);
+        }
+        (lo, hi)
+    };
+    let mut order: Vec<usize> = (0..references.len()).collect();
+    // Timed files by start time first, then untimed in the given order.
+    order.sort_by(|&a, &b| match (references[a].info.start_epoch, references[b].info.start_epoch) {
+        (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a.cmp(&b),
+    });
+    let mut pos = vec![0.0; references.len()];
+    let mut end = f64::NEG_INFINITY; // timeline end so far
+    let mut prev: Option<(f64, f64)> = None; // (epoch, timeline position) of the last timed file
+    for &i in &order {
+        let (lo, hi) = span(&references[i]);
+        let after = if end.is_finite() { end + GAP - lo } else { 0.0 };
+        let p = match (references[i].info.start_epoch, prev) {
+            (Some(ep), Some((pe, pp))) => {
+                let real = pp + (ep - pe);
+                // Keep real timing while it's close; overlapping recorders stay overlapped.
+                if real + lo - end <= MAX_REAL_GAP { real } else { after }
+            }
+            (Some(_), None) => 0.0,
+            (None, _) => after,
+        };
+        if let Some(ep) = references[i].info.start_epoch {
+            prev = Some((ep, p));
+        }
+        pos[i] = p;
+        end = end.max(p + hi);
+    }
+    pos
+}
+
+/// Build an FCP7-style XML (xmeml v4) with ONE synced sequence holding every recorder file
+/// and every matched clip. Cameras go on V1, V2… (overlapping clips get their own track),
+/// camera sound on matching audio tracks, and the recorder files on the tracks below them.
 pub fn timeline_xml(matches: &[Match], references: &[crate::sync::Reference]) -> String {
     let mut x = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE xmeml>\n<xmeml version=\"4\">\n<project><name>JoshGrade Sync</name><children>\n");
     let mut defined = std::collections::HashSet::new();
-    let mut uid = 0usize;
-    for (ri, r) in references.iter().enumerate() {
-        let ms: Vec<&Match> = matches.iter().filter(|m| m.reference.as_deref() == Some(r.path.as_str()) && m.clip != r.path).collect();
-        if ms.is_empty() {
+    let ref_pos = reference_layout(matches, references);
+    let ref_of = |p: &str| references.iter().position(|r| r.path == p);
+
+    // Clips that go on the picture/camera-sound tracks, with their timeline start in seconds.
+    let mut items: Vec<(&Match, f64)> = Vec::new();
+    for m in matches {
+        let Some(ri) = m.reference.as_deref().and_then(ref_of) else { continue };
+        // In camera-to-camera mode the reference is itself a camera clip: show it as one.
+        if m.clip == references[ri].path && !m.clip_info.has_video {
             continue;
         }
-        // Sequence settings come from the first camera clip.
-        let first = ms.iter().find(|m| m.clip_info.has_video).map(|m| &m.clip_info).unwrap_or(&ms[0].clip_info);
-        let (tb, ntsc) = timebase(first);
-        let fps = if first.fps() > 0.0 { first.fps() } else { tb as f64 };
-        let t0 = ms.iter().map(|m| m.offset).fold(0.0f64, f64::min);
-        let fr = |t: f64| ((t - t0) * fps).round() as i64;
-
-        // Assign overlapping clips to separate tracks.
-        let mut order: Vec<&Match> = ms.clone();
-        order.sort_by(|a, b| a.offset.partial_cmp(&b.offset).unwrap());
-        let mut track_end: Vec<i64> = Vec::new();
-        let mut placed: Vec<(usize, &Match, i64, i64)> = Vec::new();
-        for m in order {
-            let s = fr(m.offset);
-            let e = s + (m.clip_info.duration * fps).round() as i64;
-            let t = match track_end.iter().position(|&end| end <= s) {
-                Some(t) => t,
-                None => {
-                    track_end.push(i64::MIN);
-                    track_end.len() - 1
-                }
-            };
-            track_end[t] = e;
-            placed.push((t, m, s, e));
-        }
-        let n_tracks = track_end.len();
-        let rec_frames = (r.info.duration * fps).round() as i64;
-        let seq_end = placed.iter().map(|p| p.3).max().unwrap_or(0).max(fr(0.0) + rec_frames);
-        let rec_name = esc(&ffmpeg::file_name(Path::new(&r.path)));
-        let fmt = format!(
-            "<format><samplecharacteristics>{}<width>{}</width><height>{}</height><pixelaspectratio>square</pixelaspectratio></samplecharacteristics></format>",
-            rate_xml(tb, ntsc), first.width.max(16), first.height.max(16)
-        );
-        let _ = write!(x, "<sequence id=\"sequence-{}\"><name>Synced – {rec_name}</name><duration>{seq_end}</duration>{}<media>\n<video>{fmt}\n", ri + 1, rate_xml(tb, ntsc));
-
-        let mut ids: Vec<(usize, usize, String, String, String)> = Vec::new(); // (track, idx, vid id, aud id, file id)
-        for (t, m, _, _) in &placed {
-            uid += 1;
-            let file_id = format!("file-{}", sanitize_id(&m.clip));
-            ids.push((*t, uid, format!("clipitem-v{uid}"), format!("clipitem-a{uid}"), file_id));
-            let _ = m;
-        }
-        for t in 0..n_tracks {
-            x.push_str("<track>\n");
-            let mut idx = 0;
-            for (k, (pt, m, s, e)) in placed.iter().enumerate() {
-                if *pt != t || !m.clip_info.has_video {
-                    continue;
-                }
-                idx += 1;
-                let (_, _, vid, aud, fid) = &ids[k];
-                let frames = e - s;
-                let _ = write!(
-                    x,
-                    "<clipitem id=\"{vid}\"><name>{}</name><enabled>TRUE</enabled><duration>{frames}</duration>{}<start>{s}</start><end>{e}</end><in>0</in><out>{frames}</out>{}",
-                    esc(&ffmpeg::file_name(Path::new(&m.clip))), rate_xml(tb, ntsc),
-                    file_xml(fid, &m.clip_info, tb, ntsc, fps, &mut defined)
-                );
-                let _ = write!(x, "<link><linkclipref>{vid}</linkclipref><mediatype>video</mediatype><trackindex>{}</trackindex><clipindex>{idx}</clipindex></link>", t + 1);
-                if m.clip_info.has_audio {
-                    let _ = write!(x, "<link><linkclipref>{aud}</linkclipref><mediatype>audio</mediatype><trackindex>{}</trackindex><clipindex>{idx}</clipindex></link>", t + 1);
-                }
-                x.push_str("</clipitem>\n");
-            }
-            x.push_str("</track>\n");
-        }
-        x.push_str("</video>\n<audio>\n");
-        // camera sound
-        for t in 0..n_tracks {
-            x.push_str("<track>\n");
-            for (k, (pt, m, s, e)) in placed.iter().enumerate() {
-                if *pt != t || !m.clip_info.has_audio {
-                    continue;
-                }
-                let (_, _, _, aud, fid) = &ids[k];
-                let frames = e - s;
-                let _ = write!(
-                    x,
-                    "<clipitem id=\"{aud}\"><name>{}</name><enabled>TRUE</enabled><duration>{frames}</duration>{}<start>{s}</start><end>{e}</end><in>0</in><out>{frames}</out>{}<sourcetrack><mediatype>audio</mediatype><trackindex>1</trackindex></sourcetrack></clipitem>\n",
-                    esc(&ffmpeg::file_name(Path::new(&m.clip))), rate_xml(tb, ntsc),
-                    file_xml(fid, &m.clip_info, tb, ntsc, fps, &mut defined)
-                );
-            }
-            x.push_str("</track>\n");
-        }
-        // recorder
-        uid += 1;
-        let rs = fr(0.0);
-        let _ = write!(
-            x,
-            "<track>\n<clipitem id=\"clipitem-r{uid}\"><name>{rec_name}</name><enabled>TRUE</enabled><duration>{rec_frames}</duration>{}<start>{rs}</start><end>{}</end><in>0</in><out>{rec_frames}</out>{}<sourcetrack><mediatype>audio</mediatype><trackindex>1</trackindex></sourcetrack></clipitem>\n</track>\n",
-            rate_xml(tb, ntsc), rs + rec_frames,
-            file_xml(&format!("file-{}", sanitize_id(&r.path)), &r.info, tb, ntsc, fps, &mut defined)
-        );
-        x.push_str("</audio>\n</media></sequence>\n");
+        items.push((m, ref_pos[ri] + m.offset));
     }
-    x.push_str("</children></project>\n</xmeml>\n");
+    // Recorder files (audio-only references) go on their own tracks.
+    let recs: Vec<usize> = (0..references.len()).filter(|&i| !references[i].info.has_video).collect();
+    if items.is_empty() && recs.is_empty() {
+        x.push_str("</children></project>\n</xmeml>\n");
+        return x;
+    }
+
+    // Sequence settings come from the first camera clip.
+    let first = items.iter().map(|i| &i.0.clip_info).find(|c| c.has_video).or(items.first().map(|i| &i.0.clip_info)).unwrap_or(&references[0].info);
+    let (tb, ntsc) = timebase(first);
+    let fps = if first.fps() > 0.0 { first.fps() } else { tb as f64 };
+    let t0 = items.iter().map(|i| i.1).chain(recs.iter().map(|&r| ref_pos[r])).fold(f64::INFINITY, f64::min).min(0.0);
+    let fr = |t: f64| ((t - t0) * fps).round() as i64;
+
+    // Greedy: each item goes on the first track that is free at its start.
+    fn assign(spans: &[(i64, i64)]) -> (Vec<usize>, usize) {
+        let mut order: Vec<usize> = (0..spans.len()).collect();
+        order.sort_by_key(|&i| spans[i].0);
+        let mut ends: Vec<i64> = Vec::new();
+        let mut track = vec![0; spans.len()];
+        for i in order {
+            let t = ends.iter().position(|&e| e <= spans[i].0).unwrap_or_else(|| {
+                ends.push(i64::MIN);
+                ends.len() - 1
+            });
+            ends[t] = spans[i].1;
+            track[i] = t;
+        }
+        (track, ends.len())
+    }
+    let spans: Vec<(i64, i64)> = items.iter().map(|(m, t)| (fr(*t), fr(*t) + (m.clip_info.duration * fps).round() as i64)).collect();
+    let (track, n_tracks) = assign(&spans);
+    let rec_spans: Vec<(i64, i64)> = recs.iter().map(|&r| (fr(ref_pos[r]), fr(ref_pos[r]) + (references[r].info.duration * fps).round() as i64)).collect();
+    let (rec_track, n_rec_tracks) = assign(&rec_spans);
+    let seq_end = spans.iter().chain(rec_spans.iter()).map(|s| s.1).max().unwrap_or(0);
+
+    let fmt = format!(
+        "<format><samplecharacteristics>{}<width>{}</width><height>{}</height><pixelaspectratio>square</pixelaspectratio></samplecharacteristics></format>",
+        rate_xml(tb, ntsc), first.width.max(16), first.height.max(16)
+    );
+    let _ = write!(x, "<sequence id=\"sequence-1\"><name>JoshGrade Sync</name><duration>{seq_end}</duration>{}<media>\n<video>{fmt}\n", rate_xml(tb, ntsc));
+
+    let name = |p: &str| esc(&ffmpeg::file_name(Path::new(p)));
+    let fid = |p: &str| format!("file-{}", sanitize_id(p));
+    // Clip index of each item within its track (in time order), for the link elements.
+    let mut clip_idx = vec![0usize; items.len()];
+    for t in 0..n_tracks {
+        let mut on: Vec<usize> = (0..items.len()).filter(|&k| track[k] == t).collect();
+        on.sort_by_key(|&k| spans[k].0);
+        for (n, k) in on.into_iter().enumerate() {
+            clip_idx[k] = n + 1;
+        }
+    }
+    let in_time_order = |t: usize, want_video: bool| {
+        let mut on: Vec<usize> = (0..items.len()).filter(|&k| track[k] == t && if want_video { items[k].0.clip_info.has_video } else { items[k].0.clip_info.has_audio }).collect();
+        on.sort_by_key(|&k| spans[k].0);
+        on
+    };
+    for t in 0..n_tracks {
+        x.push_str("<track>\n");
+        for k in in_time_order(t, true) {
+            let m = items[k].0;
+            let (s, e) = spans[k];
+            let frames = e - s;
+            let _ = write!(
+                x,
+                "<clipitem id=\"clipitem-v{k}\"><name>{}</name><enabled>TRUE</enabled><duration>{frames}</duration>{}<start>{s}</start><end>{e}</end><in>0</in><out>{frames}</out>{}",
+                name(&m.clip), rate_xml(tb, ntsc), file_xml(&fid(&m.clip), &m.clip_info, tb, ntsc, fps, &mut defined)
+            );
+            let _ = write!(x, "<link><linkclipref>clipitem-v{k}</linkclipref><mediatype>video</mediatype><trackindex>{}</trackindex><clipindex>{}</clipindex></link>", t + 1, clip_idx[k]);
+            if m.clip_info.has_audio {
+                let _ = write!(x, "<link><linkclipref>clipitem-a{k}</linkclipref><mediatype>audio</mediatype><trackindex>{}</trackindex><clipindex>{}</clipindex></link>", t + 1, clip_idx[k]);
+            }
+            x.push_str("</clipitem>\n");
+        }
+        x.push_str("</track>\n");
+    }
+    x.push_str("</video>\n<audio>\n");
+    // camera sound, one track per picture track
+    for t in 0..n_tracks {
+        x.push_str("<track>\n");
+        for k in in_time_order(t, false) {
+            let m = items[k].0;
+            let (s, e) = spans[k];
+            let frames = e - s;
+            let _ = write!(
+                x,
+                "<clipitem id=\"clipitem-a{k}\"><name>{}</name><enabled>TRUE</enabled><duration>{frames}</duration>{}<start>{s}</start><end>{e}</end><in>0</in><out>{frames}</out>{}<sourcetrack><mediatype>audio</mediatype><trackindex>1</trackindex></sourcetrack></clipitem>\n",
+                name(&m.clip), rate_xml(tb, ntsc), file_xml(&fid(&m.clip), &m.clip_info, tb, ntsc, fps, &mut defined)
+            );
+        }
+        x.push_str("</track>\n");
+    }
+    // recorder files, below the camera sound
+    for t in 0..n_rec_tracks {
+        x.push_str("<track>\n");
+        let mut on: Vec<usize> = (0..recs.len()).filter(|&k| rec_track[k] == t).collect();
+        on.sort_by_key(|&k| rec_spans[k].0);
+        for k in on {
+            let r = &references[recs[k]];
+            let (s, e) = rec_spans[k];
+            let frames = e - s;
+            let _ = write!(
+                x,
+                "<clipitem id=\"clipitem-r{k}\"><name>{}</name><enabled>TRUE</enabled><duration>{frames}</duration>{}<start>{s}</start><end>{e}</end><in>0</in><out>{frames}</out>{}<sourcetrack><mediatype>audio</mediatype><trackindex>1</trackindex></sourcetrack></clipitem>\n",
+                name(&r.path), rate_xml(tb, ntsc), file_xml(&fid(&r.path), &r.info, tb, ntsc, fps, &mut defined)
+            );
+        }
+        x.push_str("</track>\n");
+    }
+    x.push_str("</audio>\n</media></sequence>\n</children></project>\n</xmeml>\n");
     x
 }
 

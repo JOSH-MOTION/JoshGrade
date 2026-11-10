@@ -76,7 +76,7 @@ Switch to **Video › Sync audio**. Drop your camera clips and the separately re
 
 Exports:
 - **Save synced videos**: new files with the recorder's sound laid in. The picture is copied untouched (no re-encoding, no quality loss). Optionally keeps the camera's own sound as a second track. MOV gets 24-bit uncompressed audio; MP4 gets 320 kbps AAC.
-- **Export timeline (XML)**: every clip already in place over the recorder audio, cameras on separate tracks when they overlap. Premiere Pro: File › Import. DaVinci Resolve: File › Import › Timeline.
+- **Export timeline (XML)**: one sequence with every clip and every recorder file in place, cameras on separate tracks when they overlap. Several recorder files are laid out by the time each started recording (Zoom/Tascam/Sound Devices write it into the WAV), or one after another if the files carry no time. Premiere Pro: File › Import. DaVinci Resolve: File › Import › Timeline.
 
 ## Video: auto captions
 

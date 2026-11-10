@@ -71,6 +71,10 @@ pub struct MediaInfo {
     pub sample_rate: u32,
     /// Embedded start timecode, if the camera wrote one (e.g. "14:03:22:11").
     pub timecode: Option<String>,
+    /// When recording started, as seconds since 1970 (from the recorder's BWF time
+    /// reference, the timecode, or the creation time) — used to put several recorder
+    /// files on one timeline.
+    pub start_epoch: Option<f64>,
 }
 
 impl MediaInfo {
@@ -115,7 +119,55 @@ pub fn probe(tools: &Tools, path: &Path) -> Result<MediaInfo, Error> {
         }
     }
     info.timecode = tc;
+    info.start_epoch = start_time(&v["format"]["tags"], &info);
     Ok(info)
+}
+
+/// Days since 1970-01-01 for a civil date (proleptic Gregorian).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+fn parse_date(s: &str) -> Option<i64> {
+    let p: Vec<i64> = s.get(..10)?.split(['-', ':', '/']).filter_map(|x| x.parse().ok()).collect();
+    (p.len() == 3 && p[0] > 1970).then(|| days_from_civil(p[0], p[1], p[2]))
+}
+
+fn parse_hms(s: &str) -> Option<f64> {
+    let p: Vec<f64> = s.split([':', ';', '-']).filter_map(|x| x.parse().ok()).collect();
+    (p.len() >= 3).then(|| p[0] * 3600.0 + p[1] * 60.0 + p[2])
+}
+
+fn start_time(tags: &serde_json::Value, info: &MediaInfo) -> Option<f64> {
+    let get = |k: &str| tags[k].as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let created = get("creation_time");
+    // A date: BWF "date"/"origination_date", or the date part of an ISO creation time.
+    let day = get("date").or_else(|| get("origination_date")).and_then(|d| parse_date(&d)).or_else(|| created.as_deref().and_then(parse_date));
+    // 1. Broadcast WAV time reference (samples since midnight) — exact, written by Zoom/Tascam/Sound Devices.
+    if let (Some(tr), Some(d)) = (get("time_reference").and_then(|t| t.parse::<f64>().ok()), day) {
+        if info.sample_rate > 0 && tr > 0.0 {
+            return Some(d as f64 * 86400.0 + tr / info.sample_rate as f64);
+        }
+    }
+    // 2. Timecode (time of day on most cameras/recorders).
+    if let (Some(tc), Some(d)) = (info.timecode.as_deref(), day) {
+        let p: Vec<f64> = tc.split([':', ';']).filter_map(|x| x.parse().ok()).collect();
+        if p.len() == 4 && (p[0] + p[1] + p[2]) > 0.0 {
+            let fps = if info.fps() > 0.0 { info.fps().round() } else { 25.0 };
+            return Some(d as f64 * 86400.0 + p[0] * 3600.0 + p[1] * 60.0 + p[2] + p[3] / fps);
+        }
+    }
+    // 3. Creation time: either "HH:MM:SS" with a separate date (BWF) or full ISO "2026-11-08T10:22:31Z".
+    let c = created?;
+    if c.len() >= 19 && c.as_bytes()[10] == b'T' {
+        return Some(parse_date(&c)? as f64 * 86400.0 + parse_hms(&c[11..])?);
+    }
+    Some(day? as f64 * 86400.0 + parse_hms(&c)?)
 }
 
 /// Stream a file's audio as mono f32 at `rate` Hz, handing it to `sink` in chunks.

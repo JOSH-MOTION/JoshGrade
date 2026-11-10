@@ -318,6 +318,9 @@ pub struct Reference {
 pub struct SyncReport {
     pub references: Vec<Reference>,
     pub matches: Vec<Match>,
+    /// Where each reference sits on the one shared timeline (seconds), same order as `references`.
+    #[serde(default)]
+    pub positions: Vec<f64>,
 }
 
 /// 10 Hz 0..1 loudness envelope for drawing waveforms.
@@ -515,8 +518,7 @@ pub fn sync(
         });
     }
     progress(Progress { step: "Done".into(), done: total, total });
-    Ok(SyncReport {
-        references: refs.iter().map(|r| Reference { path: r.path.to_string_lossy().into_owned(), info: r.info.clone(), envelope: envelope(&r.energy) }).collect(),
-        matches,
-    })
+    let references: Vec<Reference> = refs.iter().map(|r| Reference { path: r.path.to_string_lossy().into_owned(), info: r.info.clone(), envelope: envelope(&r.energy) }).collect();
+    let positions = crate::export::reference_layout(&matches, &references);
+    Ok(SyncReport { references, matches, positions })
 }
