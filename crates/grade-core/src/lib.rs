@@ -19,6 +19,7 @@ pub mod learn;
 pub mod looks;
 pub mod lens;
 pub mod lut;
+pub mod spots;
 pub mod masks;
 pub mod report;
 pub mod retouch;
@@ -150,6 +151,10 @@ pub fn save_graded(input: &Path, output: &Path, settings: &Settings, format: Out
     // lens corrections / transform (before grading, like a RAW developer)
     if settings.lens.active() {
         full = lens::apply(&full, &settings.lens);
+    }
+    // spot removal / red eye (positions are on the corrected photo)
+    if !settings.spots.is_empty() {
+        full = spots::apply_whole(&full, &settings.spots);
     }
     let seg = if masks::needs_ai(&settings.masks) && masks::active(&settings.masks) {
         let s = if settings.lens.geometric() { lens::apply(&small, &settings.lens) } else { small.clone() };

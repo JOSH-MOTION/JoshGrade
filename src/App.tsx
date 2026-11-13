@@ -8,6 +8,7 @@ import { ColorWheel, Histogram, ScopeData, bandColor } from "./Scopes";
 import { Tip } from "./Tip";
 import { CurveEditor, Curves, freshCurves } from "./CurveEditor";
 import { Crop, cropActive, cropToAspect, fitCrop, freshCrop, Viewer } from "./Viewer";
+import { type Spot, type SpotKind } from "./Spots";
 import { GradeWheel, type Wheel } from "./GradeWheel";
 import { Brush, KINDS, Mask, MaskAdjust, MaskKind, freshMaskAdjust, isAi, newMask } from "./Masks";
 
@@ -38,13 +39,14 @@ const PARTS = [
   { id: "aimasks", label: "Masks: Person, Sky, Background", hint: "Found again on each photo" },
   { id: "handmasks", label: "Masks: Brush, Linear, Radial", hint: "Same place on every photo" },
   { id: "lens", label: "Lens & transform", hint: "Distortion, fringes, lens vignetting, perspective" },
+  { id: "spots", label: "Spot removal & red eye", hint: "Same place on every photo" },
   { id: "crop", label: "Crop & straighten", hint: "" },
 ] as const;
 type Part = (typeof PARTS)[number]["id"];
 const DEFAULT_PARTS: Part[] = ["grade", "light", "curve", "detail", "effects", "retouch", "aimasks", "lens"];
 const EFFECT_KEYS = ["vignette", "vignette_midpoint", "vignette_feather", "grain", "grain_size"] as const;
 /** `target` with the chosen parts taken from `src`. */
-function mergeParts<S extends { auto: boolean; look: string; strength: number; adjust: unknown; curves: unknown; detail: Detail; retouch: unknown; masks: Mask[]; crop: unknown; lens: unknown }>(
+function mergeParts<S extends { auto: boolean; look: string; strength: number; adjust: unknown; curves: unknown; detail: Detail; retouch: unknown; masks: Mask[]; crop: unknown; lens: unknown; spots: unknown }>(
   target: S,
   src: S,
   parts: Part[],
@@ -69,6 +71,7 @@ function mergeParts<S extends { auto: boolean; look: string; strength: number; a
     t.masks = [...c.masks.filter(pick), ...t.masks.filter((m) => !pick(m))];
   }
   if (has("lens")) t.lens = c.lens;
+  if (has("spots")) t.spots = c.spots;
   if (has("crop")) t.crop = c.crop;
   return t;
 }
@@ -78,7 +81,7 @@ const freshDetail = (): Detail => ({
   vignette: 0, vignette_midpoint: 50, vignette_feather: 50, grain: 0, grain_size: 25,
 });
 type Retouch = { enabled: boolean; blemishes: number; smooth: number; even: number; shine: number; keep_moles: boolean; keep_freckles: boolean };
-type Settings = { auto: boolean; look: string; strength: number; adjust: Adjust; retouch: Retouch; crop: Crop; curves: Curves; detail: Detail; masks: Mask[]; lens: Lens };
+type Settings = { auto: boolean; look: string; strength: number; adjust: Adjust; retouch: Retouch; crop: Crop; curves: Curves; detail: Detail; masks: Mask[]; lens: Lens; spots: Spot[] };
 type Lens = {
   distortion: number; vignetting: number; vignetting_mid: number; remove_ca: boolean; defringe_purple: number; defringe_green: number;
   vertical: number; horizontal: number; rotate: number; aspect: number; scale: number; x_offset: number; y_offset: number; constrain: boolean;
@@ -108,7 +111,7 @@ const freshAdjust = (): Adjust => ({
   grading: freshGrading(), param: [0, 0, 0, 0], calibration: freshCalibration(),
 });
 const freshRetouch = (): Retouch => ({ enabled: false, blemishes: 1, smooth: 0.45, even: 0.5, shine: 0.35, keep_moles: true, keep_freckles: true });
-const freshSettings = (): Settings => ({ auto: true, look: "natural", strength: 1, adjust: freshAdjust(), retouch: freshRetouch(), crop: freshCrop(), curves: freshCurves(), detail: freshDetail(), masks: [], lens: freshLens() });
+const freshSettings = (): Settings => ({ auto: true, look: "natural", strength: 1, adjust: freshAdjust(), retouch: freshRetouch(), crop: freshCrop(), curves: freshCurves(), detail: freshDetail(), masks: [], lens: freshLens(), spots: [] });
 const clone = <T,>(s: T): T => JSON.parse(JSON.stringify(s));
 
 const EXTENSIONS = [
@@ -208,6 +211,7 @@ function normalize(stored: Settings): Settings {
     detail: { ...freshDetail(), ...stored.detail },
     masks: (stored.masks ?? []).map((m) => ({ ...m, adjust: { ...freshMaskAdjust(), ...m.adjust } })),
     lens: { ...freshLens(), ...stored.lens },
+    spots: stored.spots ?? [],
   };
 }
 
@@ -439,6 +443,24 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
     if (r) update((s) => void Object.assign(s.adjust, { temp: r[0], tint: r[1] }));
     else setToast({ text: "That spot is too dark or too bright to judge. Click something light grey or white that isn't blown out." });
   };
+  // spot removal (heal / clone) and red eye
+  const [spotTool, setSpotTool] = useState<SpotKind | null>(null);
+  const [spotSize, setSpotSize] = useState(0.02);
+  const [spotSel, setSpotSel] = useState<number | null>(null);
+  const addSpot = async (x: number, y: number) => {
+    if (!current || !spotTool) return;
+    const kind = spotTool;
+    const r = kind === "redeye" ? Math.min(spotSize, 0.03) : spotSize;
+    let src: [number, number] = [x, y];
+    if (kind !== "redeye") {
+      const f = await invoke<[number, number] | null>("spot_source", { path: current.path, settings: eff(settings), x, y, r }).catch(() => null);
+      src = f ?? [Math.min(1 - r, x + r * 2.5), y];
+    }
+    update((s) => void s.spots.push({ kind, x, y, r, sx: src[0], sy: src[1], feather: kind === "redeye" ? 0.3 : 0.5, opacity: 1 }));
+    setSpotSel(settings.spots.length);
+  };
+  const setSpot = (key: "feather" | "opacity" | "r") => (v: number) =>
+    spotSel !== null && update((s) => void (s.spots[spotSel] && (s.spots[spotSel][key] = key === "r" ? v / 1000 : v / 100)));
   const setDet = (key: keyof Detail) => (v: number) => update((s) => void (s.detail[key] = v));
   const setBandAdj = (key: "hue" | "sat" | "lum") => (v: number) => update((s) => void (s.adjust[key][band] = v));
 
@@ -494,6 +516,9 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
   const [overlayUrl, setOverlayUrl] = useState<string | null>(null);
   const selMask = maskSel !== null ? settings.masks[maskSel] : undefined;
   useEffect(() => setMaskSel(null), [current?.path]);
+  useEffect(() => setSpotSel(null), [current?.path]);
+  const spotSelRef = useRef<number | null>(null);
+  spotSelRef.current = spotTool ? spotSel : null;
   useEffect(() => {
     if (maskSel !== null && maskSel >= settings.masks.length) setMaskSel(settings.masks.length ? settings.masks.length - 1 : null);
   }, [settings.masks.length, maskSel]);
@@ -705,8 +730,19 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
       if (e.key === "[" ) setBrush((b) => ({ ...b, size: Math.max(0.004, b.size / 1.2) }));
       if (e.key === "]") setBrush((b) => ({ ...b, size: Math.min(0.3, b.size * 1.2) }));
       if (e.key.toLowerCase() === "w" && !e.metaKey && !e.ctrlKey) setPicking((p) => !p);
+      if (e.key.toLowerCase() === "q" && !e.metaKey && !e.ctrlKey && !e.repeat) {
+        setSpotTool((t) => (t ? null : "heal"));
+        setMaskSel(null);
+      }
+      if ((e.key === "Delete" || e.key === "Backspace") && spotSelRef.current !== null) {
+        const i = spotSelRef.current;
+        update((s) => void s.spots.splice(i, 1));
+        setSpotSel(null);
+      }
       if (e.key === "Escape") {
         setPicking(false);
+        setSpotTool(null);
+        setSpotSel(null);
         setCropMode(false);
         setMaskSel(null);
       }
@@ -910,6 +946,10 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
                   zoomCmd={zoomCmd}
                   onZoom={(z, z100) => setZoomInfo({ z, z100 })}
                   onPick={picking ? pickWb : null}
+                  spotTool={spotTool && !picking ? {
+                    kind: spotTool, size: spotSize, spots: settings.spots, sel: spotSel, onAdd: addSpot, onSelect: setSpotSel,
+                    onChange: (i, sp) => update((s) => void (s.spots[i] = sp)),
+                  } : null}
                   maskTool={selMask && maskSel !== null ? { mask: selMask, brush, onChange: (m) => update((s) => void (s.masks[maskSel] = m)) } : null}
                 />
               ) : (
@@ -1371,6 +1411,33 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
           <h2 className="sub">Grain</h2>
           <Slider label="Amount" tip="d_grain" value={settings.detail.grain} min={0} max={100} def={0} onChange={setDet("grain")} />
           <Slider label="Size" tip="d_gsize" value={settings.detail.grain_size} min={0} max={100} def={25} onChange={setDet("grain_size")} />
+        </div>
+
+        <div className={g("", "spots")} data-g="spots">
+          <h2><Tip k="s_spots">Remove</Tip></h2>
+          <div className="preset-chips spot-tools">
+            {(["heal", "clone", "redeye"] as const).map((k) => (
+              <button key={k} className={`chip ${spotTool === k ? "on" : ""}`} aria-pressed={spotTool === k} onClick={() => { setSpotTool((t) => (t === k ? null : k)); setMaskSel(null); setPicking(false); }}>
+                {k === "heal" ? "Heal" : k === "clone" ? "Clone" : "Red eye"}
+              </button>
+            ))}
+          </div>
+          {spotTool && <p className="hint">{spotTool === "redeye" ? "Click each red pupil." : "Click a spot to remove it. Drag the dashed circle to choose where it copies from."} Q to finish, Delete removes the selected one.</p>}
+          <Slider label="Brush size" tip="s_size" value={Math.round(spotSize * 1000)} min={3} max={150} def={20} onChange={(v) => setSpotSize(v / 1000)} />
+          {spotSel !== null && settings.spots[spotSel] && (
+            <>
+              <h2 className="sub">Selected spot</h2>
+              <Slider label="Size" tip="s_size" value={Math.round(settings.spots[spotSel].r * 1000)} min={3} max={150} def={20} onChange={setSpot("r")} />
+              <Slider label="Feather" tip="s_feather" value={Math.round(settings.spots[spotSel].feather * 100)} min={0} max={100} def={50} onChange={setSpot("feather")} />
+              <Slider label="Opacity" tip="s_opacity" value={Math.round(settings.spots[spotSel].opacity * 100)} min={0} max={100} def={100} onChange={setSpot("opacity")} />
+            </>
+          )}
+          {settings.spots.length > 0 && (
+            <div className="spot-links">
+              {spotSel !== null && settings.spots[spotSel] && <button className="link" onClick={() => { update((s) => void s.spots.splice(spotSel, 1)); setSpotSel(null); }}>Delete this spot</button>}
+              <button className="link" onClick={() => { update((s) => void (s.spots = [])); setSpotSel(null); }}>Clear all {settings.spots.length} spot{settings.spots.length > 1 ? "s" : ""}</button>
+            </div>
+          )}
         </div>
 
         <div className={g("", "lens")} data-g="lens">

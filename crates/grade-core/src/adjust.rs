@@ -103,11 +103,13 @@ pub struct Settings {
     pub masks: Vec<crate::masks::Mask>,
     /// Lens corrections and Transform.
     pub lens: crate::lens::Lens,
+    /// Spot removal and red eye.
+    pub spots: Vec<crate::spots::Spot>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { auto: true, look: "natural".into(), strength: 1.0, adjust: Adjust::default(), retouch: Default::default(), crop: Default::default(), curves: Default::default(), detail: Default::default(), masks: vec![], lens: Default::default() }
+        Settings { auto: true, look: "natural".into(), strength: 1.0, adjust: Adjust::default(), retouch: Default::default(), crop: Default::default(), curves: Default::default(), detail: Default::default(), masks: vec![], lens: Default::default(), spots: vec![] }
     }
 }
 

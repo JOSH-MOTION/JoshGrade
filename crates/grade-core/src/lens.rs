@@ -435,3 +435,17 @@ mod tests {
         assert!((a + 3.0).abs() < 0.3, "{a}");
     }
 }
+
+/// Read the corrected photo at any full-frame point (geometry only), straight from the
+/// uncorrected source — used where a tool needs pixels outside the piece being drawn.
+pub fn sampler<'a>(src: &'a Photo, l: &Lens, full_w: f32, full_h: f32) -> impl Fn(f32, f32) -> Rgb + Sync + 'a {
+    let warp = Warp::new(l, full_w, full_h);
+    let geo = l.geometric();
+    let half = full_w.max(full_h) / 2.0;
+    let sk = src.width as f32 / full_w;
+    move |fx: f32, fy: f32| {
+        let (nx, ny) = ((fx - full_w / 2.0) / half, (fy - full_h / 2.0) / half);
+        let (sx, sy) = if geo { warp.map(nx, ny) } else { (nx, ny) };
+        bilinear(src, (sx * half + full_w / 2.0) * sk - 0.5, (sy * half + full_h / 2.0) * sk - 0.5).unwrap_or([0.0; 3])
+    }
+}

@@ -257,6 +257,7 @@ async fn preview(state: St<'_>, path: String, settings: Settings, with_before: b
         let cr = settings.crop;
         let turned = cr.rot90 % 4 != 0 || cr.flip_h;
         let lensed = e.lensed(base.as_deref().unwrap_or(&e.photo), &settings.lens);
+        let lensed = if settings.spots.is_empty() { lensed } else { grade_core::spots::apply_whole(&lensed, &settings.spots) };
         let after = grade.apply(&lensed);
         drop(lensed);
         let seg = if masks::active(&settings.masks) { e.segments(&settings.masks, &settings.lens)? } else { None };
@@ -346,6 +347,11 @@ async fn preview_region(state: St<'_>, path: String, settings: Settings, region:
             }
             piece
         };
+        if !before && !settings.spots.is_empty() {
+            let f = grade_core::lens::sampler(&base, &settings.lens, bw, bh);
+            let win = grade_core::lens::Window { full_w: bw, full_h: bh, x0: px0 as f32, y0: py0 as f32, step: 1.0 };
+            grade_core::spots::apply(&mut piece, &settings.spots, &win, &f);
+        }
         if !before {
             let grade = grade_core::grade_with(&e.analysis, &settings).map_err(|e| e.to_string())?;
             let seg = if masks::active(&settings.masks) { e.segments(&settings.masks, &settings.lens)? } else { None };
@@ -532,6 +538,20 @@ async fn auto_level(state: St<'_>, path: String, settings: Settings) -> Result<O
     .await
 }
 
+/// Remove tool: a good place to copy from for a new spot at (x, y) with radius r (fractions
+/// of the upright, corrected photo).
+#[tauri::command]
+async fn spot_source(state: St<'_>, path: String, settings: Settings, x: f32, y: f32, r: f32) -> Result<(f32, f32), String> {
+    let st = Arc::clone(&state);
+    blocking(move || {
+        let e = cached(&st, &path)?;
+        let shown = e.lensed(&e.photo, &settings.lens);
+        let shown = grade_core::spots::apply_whole(&shown, &settings.spots);
+        Ok(grade_core::spots::find_source(&shown, x, y, r))
+    })
+    .await
+}
+
 /// White balance eyedropper: click something that should be grey. `x`, `y` are fractions of
 /// the photo as shown (after quarter turns / flip).
 #[tauri::command]
@@ -683,6 +703,7 @@ fn main() {
             prefetch,
             wb_pick,
             auto_level,
+            spot_source,
             jobs::jobs_list,
             jobs::job_cancel,
             jobs::jobs_clear,

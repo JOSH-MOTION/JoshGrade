@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { MaskCanvas, type Brush, type Mask } from "./Masks";
+import { SpotCanvas, type Spot, type SpotKind } from "./Spots";
 
 export type Crop = { rot90: number; flip_h: boolean; angle: number; x: number; y: number; w: number; h: number };
 export const freshCrop = (): Crop => ({ rot90: 0, flip_h: false, angle: 0, x: 0, y: 0, w: 1, h: 1 });
@@ -65,6 +66,11 @@ export function Viewer(props: {
   maskTool?: { mask: Mask; brush: Brush; onChange: (m: Mask) => void } | null;
   /** Picking a point (white balance eyedropper, spot tools): x, y as fractions of the shown photo. */
   onPick?: ((x: number, y: number) => void) | null;
+  /** Remove / red-eye tool. */
+  spotTool?: {
+    kind: SpotKind; size: number; spots: Spot[]; sel: number | null;
+    onAdd: (x: number, y: number) => void; onChange: (i: number, s: Spot) => void; onSelect: (i: number | null) => void;
+  } | null;
 }) {
   const { W, H, crop, cropMode } = props;
   const box = useRef<HTMLDivElement>(null);
@@ -184,6 +190,7 @@ export function Viewer(props: {
     return [(ix * cs - iy * sn + (W * s) / 2) / (W * s), (ix * sn + iy * cs + (H * s) / 2) / (H * s)];
   };
   const tool = !cropMode && props.maskTool ? props.maskTool : null;
+  const spotTool = !cropMode && !tool && props.spotTool ? props.spotTool : null;
 
   const layer = (src: string, tile?: Tile, extra?: string | null, child?: ReactNode) => (
     <div
@@ -215,7 +222,7 @@ export function Viewer(props: {
     }
     const t = e.target as HTMLElement;
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    const mode = t.dataset.h ?? (cropMode ? (t.closest(".crop-rect") ? "move" : "") : zoom > 1.001 && !t.closest(".divider") ? "pan" : tool ? "" : "split");
+    const mode = t.dataset.h ?? (cropMode ? (t.closest(".crop-rect") ? "move" : "") : zoom > 1.001 && !t.closest(".divider") ? "pan" : tool || spotTool ? "" : "split");
     drag.current = { mode, x: e.clientX, y: e.clientY, c: { ...crop }, pan: { ...pan } };
     if (mode === "split") moveSplit(e.clientX);
   };
@@ -300,15 +307,19 @@ export function Viewer(props: {
             props.after,
             tiles.after,
             props.overlay,
-            tool && <MaskCanvas mask={tool.mask} brush={tool.brush} onChange={tool.onChange} Ws={W * s} Hs={H * s} turn={{ rot: crop.rot90, flip: crop.flip_h }} zoom={zoom} toImage={toImage} />,
+            tool ? (
+              <MaskCanvas mask={tool.mask} brush={tool.brush} onChange={tool.onChange} Ws={W * s} Hs={H * s} turn={{ rot: crop.rot90, flip: crop.flip_h }} zoom={zoom} toImage={toImage} />
+            ) : spotTool ? (
+              <SpotCanvas {...spotTool} Ws={W * s} Hs={H * s} turn={{ rot: crop.rot90, flip: crop.flip_h }} zoom={zoom} toImage={toImage} />
+            ) : null,
           )}
         </div>
-        {!cropMode && (!tool || props.showBefore) && (
+        {!cropMode && (!(tool || spotTool) || props.showBefore) && (
           <div className="before-clip" style={{ clipPath: props.showBefore ? "none" : `inset(0 ${100 - props.split}% 0 0)` }}>
             <div className="zoom-wrap" style={zoomStyle}>{layer(props.before, tiles.before)}</div>
           </div>
         )}
-        {!cropMode && !tool && !props.showBefore && (
+        {!cropMode && !(tool || spotTool) && !props.showBefore && (
           <div className="divider" style={{ left: `${props.split}%` }} role="slider" tabIndex={0} aria-label="Before and after divider" aria-valuenow={Math.round(props.split)}
             onKeyDown={(e) => {
               if (e.key === "ArrowLeft") props.setSplit(Math.max(0, props.split - 5));
@@ -317,8 +328,8 @@ export function Viewer(props: {
             <span className="knob" />
           </div>
         )}
-        {!cropMode && !tool && <span className="tag tag-l">{props.tagL}</span>}
-        {!cropMode && !tool && !props.showBefore && <span className="tag tag-r">{props.tagR}</span>}
+        {!cropMode && !(tool || spotTool) && <span className="tag tag-l">{props.tagL}</span>}
+        {!cropMode && !(tool || spotTool) && !props.showBefore && <span className="tag tag-r">{props.tagR}</span>}
         {cropMode && (
           <div className="crop-ui">
             <div className="crop-rect" style={{ left: crop.x * W * s, top: crop.y * H * s, width: crop.w * W * s, height: crop.h * H * s }}>
