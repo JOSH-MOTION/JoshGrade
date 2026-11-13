@@ -371,7 +371,7 @@ export default function VideoApp({ modeSwitch, active }: { modeSwitch?: ReactNod
         <span className="brand" data-tauri-drag-region>JoshGrade</span>
         {modeSwitch}
         <div className="tabs" role="tablist" aria-label="Video tools">
-          <button role="tab" aria-selected={tab === "sync"} className={tab === "sync" ? "on" : ""} onClick={() => setTab("sync")}>Sync audio</button>
+          <button role="tab" aria-selected={tab === "sync"} className={tab === "sync" ? "on" : ""} onClick={() => setTab("sync")}>Sync</button>
           <button role="tab" aria-selected={tab === "captions"} className={tab === "captions" ? "on" : ""} onClick={() => setTab("captions")}>Auto captions</button>
           <button role="tab" aria-selected={tab === "edit"} className={tab === "edit" ? "on" : ""} onClick={() => setTab("edit")}>Edit</button>
         </div>

@@ -361,25 +361,6 @@ fn camera_key(fp: &Fingerprint) -> String {
     format!("{dir}|{prefix}|{}x{}|{:.2}|{}", fp.info.width, fp.info.height, fp.info.fps(), fp.info.sample_rate)
 }
 
-/// Would clip `u` at `start` (on reference `r`) overlap another placed clip from the same camera?
-/// Only used to throw out doubtful matches: a waveform lock that strong is never chance, and
-/// two cameras of the same model can look alike here.
-fn clashes(placed: &[Option<Match>], prints: &[Result<Fingerprint, Error>], u: usize, r: &str, start: f64, dur: f64) -> bool {
-    let Ok(fu) = &prints[u] else { return false };
-    if !fu.info.has_video {
-        return false;
-    }
-    let key = camera_key(fu);
-    placed.iter().enumerate().any(|(i, m)| {
-        let (Some(m), Ok(fp)) = (m, &prints[i]) else { return false };
-        i != u
-            && m.reference.as_deref() == Some(r)
-            && camera_key(fp) == key
-            && start < m.offset + m.clip_info.duration - 1.0
-            && m.offset < start + dur - 1.0
-    })
-}
-
 /// Where one clip best sits in one of `refs` (index, offset, drift, score, confidence, overlap).
 struct Found {
     ri: usize,
@@ -529,17 +510,6 @@ pub fn sync(
     // overlap only for part of a take.
     const CAM_OVERLAP_S: f64 = 6.0;
     let camera_mode = refs.is_empty();
-    if refs.is_empty() {
-        // camera-to-camera: longest clip with sound is the reference
-        let best = prints
-            .iter()
-            .enumerate()
-            .filter_map(|(i, p)| p.as_ref().ok().map(|p| (i, p.info.duration)))
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-        if let Some((i, _)) = best {
-            refs.push(prints[i].as_ref().unwrap().clone());
-        }
-    }
 
     // Every clip's placement so far (None = not placed yet).
     let n = clips.len();
@@ -556,113 +526,201 @@ pub fn sync(
         clip_info: fp.info.clone(),
     };
 
-    // 1. Each clip against the recorder files (or, with no recorder, the longest clip).
-    for ci in 0..n {
-        if cancel.load(Ordering::Relaxed) {
-            return Err(Error::Cancelled);
-        }
-        step(progress, format!("Matching {}", ffmpeg::file_name(&clips[ci])), done);
-        done += 1;
-        let Ok(fp) = &prints[ci] else { continue };
-        // Same file as the reference (camera-to-camera mode): it is the timeline.
-        if refs.iter().any(|r| r.path == fp.path) {
-            placed[ci] = Some(mk(fp, Some(&fp.path), 0.0, 0.0, 1.0, "high", fp.info.duration));
-            continue;
-        }
-        let rr: Vec<&Fingerprint> = refs.iter().collect();
-        let label = |p: &mut dyn FnMut(Progress), s: String| p(Progress { step: s, done, total });
-        if let Some(f) = match_against(tools, &rr, fp, cancel, true, if camera_mode { Some(CAM_OVERLAP_S) } else { None }, &mut |s| label(progress, s)) {
-            // Camera to camera: only clear matches, and never two places at once for one camera
-            // (anything left over gets another chance against the other cameras below).
-            let ok = if camera_mode {
-                f.camera_ok() && (f.sharp >= 60.0 || !clashes(&placed, &prints, ci, &refs[f.ri].path.to_string_lossy(), f.offset, fp.info.duration))
-            } else {
-                f.confidence != "none"
-            };
-            if ok {
-                placed[ci] = Some(mk(fp, Some(&refs[f.ri].path), f.offset, f.drift, f.score, f.confidence, f.overlap));
+    // 1. With a recorder: each clip against the recorder files.
+    if !camera_mode {
+        for ci in 0..n {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(Error::Cancelled);
+            }
+            step(progress, format!("Matching {}", ffmpeg::file_name(&clips[ci])), done);
+            done += 1;
+            let Ok(fp) = &prints[ci] else { continue };
+            let rr: Vec<&Fingerprint> = refs.iter().collect();
+            let label = |p: &mut dyn FnMut(Progress), s: String| p(Progress { step: s, done, total });
+            if let Some(f) = match_against(tools, &rr, fp, cancel, true, None, &mut |s| label(progress, s)) {
+                if f.confidence != "none" {
+                    placed[ci] = Some(mk(fp, Some(&refs[f.ri].path), f.offset, f.drift, f.score, f.confidence, f.overlap));
+                }
             }
         }
     }
 
-    // 2. Multi-camera: clips that didn't hear the recorder (or the first camera) are lined up
-    //    through any clip that is already placed — camera B to camera A, A to the recorder.
-    //    Groups of clips that only match each other become their own synced group.
-    let mut tried: Vec<std::collections::HashSet<usize>> = vec![Default::default(); n];
-    let mut gave_up_root: std::collections::HashSet<usize> = Default::default();
-    loop {
-        if cancel.load(Ordering::Relaxed) {
-            return Err(Error::Cancelled);
+    // 2. Cameras with each other (like PluralEyes): compare every pair of clips by loudness
+    //    pattern once (fast), then confirm the strongest links one by one with the waveform
+    //    check, joining clips into groups. A clip that never heard the recorder is lined up
+    //    through another camera that did; with no recorder, the cameras form the groups.
+    let unplaced_n = (0..n).filter(|&i| placed[i].is_none() && prints[i].is_ok()).count();
+    if unplaced_n > 0 {
+        // Group of each clip and its position in that group's time (seconds).
+        // Groups: one per recorder file (clips already matched to it), or a new one per clip.
+        let mut group: Vec<usize> = vec![usize::MAX; n];
+        let mut pos: Vec<f64> = vec![0.0; n];
+        let mut has_rec: Vec<Option<String>> = Vec::new(); // per group: its recorder file
+        let mut rec_group: std::collections::HashMap<String, usize> = Default::default();
+        for i in 0..n {
+            if let Some(m) = &placed[i] {
+                let r = m.reference.clone().unwrap();
+                let g = *rec_group.entry(r.clone()).or_insert_with(|| {
+                    has_rec.push(Some(r.clone()));
+                    has_rec.len() - 1
+                });
+                group[i] = g;
+                pos[i] = m.offset;
+            } else if prints[i].is_ok() {
+                has_rec.push(None);
+                group[i] = has_rec.len() - 1;
+            }
         }
-        let mut moved = false;
-        for u in 0..n {
-            if placed[u].is_some() {
-                continue;
-            }
-            let Ok(fu) = &prints[u] else { continue };
-            let cands: Vec<usize> = (0..n).filter(|&p| p != u && !tried[u].contains(&p) && placed[p].as_ref().is_some_and(|m| m.reference.is_some()) && prints[p].is_ok()).collect();
-            if cands.is_empty() {
-                continue;
-            }
-            for &p in &cands {
-                tried[u].insert(p);
-            }
-            step(progress, format!("Lining up {} with the other cameras", ffmpeg::file_name(&fu.path)), done);
-            let mut cands = cands;
-            while !cands.is_empty() {
-                let cf: Vec<&Fingerprint> = cands.iter().map(|&p| prints[p].as_ref().unwrap()).collect();
-                let Some(f) = match_against(tools, &cf, fu, cancel, false, Some(CAM_OVERLAP_S), &mut |_| {}) else { break };
-                // Camera to camera needs the strong kind of match (both checks pass clearly).
-                if !f.camera_ok() {
-                    // the loudest look-alike wasn't real: try the remaining clips
-                    cands.remove(f.ri);
+        // All pairs, loudness pattern only (cheap). Pairs already in one group are skipped.
+        let mut edges: Vec<(f32, usize, usize, Coarse)> = Vec::new();
+        let ok: Vec<usize> = (0..n).filter(|&i| prints[i].is_ok()).collect();
+        let pairs = ok.len() * ok.len().saturating_sub(1) / 2;
+        let mut k = 0usize;
+        for (ai, &a) in ok.iter().enumerate() {
+            for &b in &ok[ai + 1..] {
+                k += 1;
+                if k % 50 == 0 {
+                    if cancel.load(Ordering::Relaxed) {
+                        return Err(Error::Cancelled);
+                    }
+                    step(progress, format!("Comparing cameras ({k} of {pairs} pairs)"), done);
+                }
+                if group[a] == group[b] {
                     continue;
                 }
-                let pm = placed[cands[f.ri]].as_ref().unwrap();
-                let dp = pm.drift_ppm * 1e-6;
-                let start = pm.offset + f.offset * (1.0 + dp);
-                let r = pm.reference.clone().unwrap();
-                // A camera can't film two things at once: reject a spot that overlaps another
-                // clip from the same camera, and try the next best.
-                if f.sharp < 60.0 && clashes(&placed, &prints, u, &r, start, fu.info.duration) {
-                    cands.remove(f.ri);
+                let (fa, fb) = (prints[a].as_ref().unwrap(), prints[b].as_ref().unwrap());
+                if let Some(c) = coarse_match_ov(&fa.feat, &fb.feat, Some(CAM_OVERLAP_S)) {
+                    if c.score >= 0.22 {
+                        edges.push((c.score, a, b, c));
+                    }
+                }
+            }
+        }
+        edges.sort_by(|x, y| y.0.partial_cmp(&x.0).unwrap());
+        // A clip only overlaps a few clips of the other cameras: keep each clip's strongest few
+        // candidates (and only ones that stand out from other positions), so the slower
+        // waveform check runs a handful of times per clip instead of for every pair.
+        {
+            let mut per: Vec<usize> = vec![0; n];
+            edges.retain(|(_, a, b, c)| {
+                let stands_out = c.score / c.second.max(0.02) >= 1.03 || c.score >= 0.45;
+                let keep = stands_out && (per[*a] < 4 || per[*b] < 4);
+                if keep {
+                    per[*a] += 1;
+                    per[*b] += 1;
+                }
+                keep
+            });
+        }
+        // Confirm links, strongest first.
+        let checks = edges.len();
+        for (ei, (_, a, b, _)) in edges.iter().enumerate() {
+            let (a, b) = (*a, *b);
+            if cancel.load(Ordering::Relaxed) {
+                return Err(Error::Cancelled);
+            }
+            let (ga, gb) = (group[a], group[b]);
+            if ga == gb || (has_rec[ga].is_some() && has_rec[gb].is_some()) {
+                continue; // already together, or two recorder files (placed by their clocks)
+            }
+            step(progress, format!("Lining up the cameras (check {} of {})", ei + 1, checks), done);
+            let (fa, fb) = (prints[a].as_ref().unwrap(), prints[b].as_ref().unwrap());
+            let Some(f) = match_against(tools, &[fa], fb, cancel, false, Some(CAM_OVERLAP_S), &mut |_| {}) else { continue };
+            if !f.camera_ok() {
+                continue;
+            }
+            // b starts at f.offset in a's time. Move the group without a recorder (or the
+            // smaller one) into the other's time.
+            let (keep, mv, shift) = {
+                let shift_b_into_a = pos[a] + f.offset - pos[b]; // add to members of b's group
+                if has_rec[gb].is_some() || (has_rec[ga].is_none() && (0..n).filter(|&i| group[i] == gb).count() > (0..n).filter(|&i| group[i] == ga).count()) {
+                    (gb, ga, -shift_b_into_a)
+                } else {
+                    (ga, gb, shift_b_into_a)
+                }
+            };
+            // A camera can't film two things at once: refuse a doubtful link that would put
+            // two clips of one camera on top of each other.
+            if f.sharp < 60.0 {
+                let mut clash = false;
+                for i in (0..n).filter(|&i| group[i] == mv) {
+                    let fi = prints[i].as_ref().unwrap();
+                    if !fi.info.has_video {
+                        continue;
+                    }
+                    let (s0, e0) = (pos[i] + shift, pos[i] + shift + fi.info.duration);
+                    for j in (0..n).filter(|&j| group[j] == keep) {
+                        let fj = prints[j].as_ref().unwrap();
+                        if camera_key(fi) == camera_key(fj) && s0 < pos[j] + fj.info.duration - 1.0 && pos[j] < e0 - 1.0 {
+                            clash = true;
+                        }
+                    }
+                }
+                if clash {
                     continue;
                 }
-                let conf = if pm.confidence == "high" { "high" } else { "medium" };
-                placed[u] = Some(mk(fu, Some(Path::new(&r)), start, dp + f.drift, f.score, conf, f.overlap));
-                moved = true;
+            }
+            for i in 0..n {
+                if group[i] == mv {
+                    group[i] = keep;
+                    pos[i] += shift;
+                }
+            }
+        }
+        // Camera groups that share no sound (a camera stopped, the other started later) are
+        // put in order by the camera's own clock: two groups holding clips from the same camera
+        // with recording times are placed by the difference in those times.
+        loop {
+            let mut merged = false;
+            'outer: for i in 0..n {
+                for j in 0..n {
+                    let (gi, gj) = (group[i], group[j]);
+                    if i == j || gi == usize::MAX || gj == usize::MAX || gi == gj || has_rec[gi].is_some() || has_rec[gj].is_some() {
+                        continue;
+                    }
+                    let (fi, fj) = (prints[i].as_ref().unwrap(), prints[j].as_ref().unwrap());
+                    let (Some(ei), Some(ej)) = (fi.info.start_epoch, fj.info.start_epoch) else { continue };
+                    if camera_key(fi) != camera_key(fj) || (ej - ei).abs() > 12.0 * 3600.0 {
+                        continue;
+                    }
+                    let shift = pos[i] + (ej - ei) - pos[j]; // add to group gj
+                    for k in 0..n {
+                        if group[k] == gj {
+                            group[k] = gi;
+                            pos[k] += shift;
+                        }
+                    }
+                    merged = true;
+                    break 'outer;
+                }
+            }
+            if !merged {
                 break;
             }
         }
-        if moved {
-            continue;
-        }
-        // Nothing more joins the existing groups: start a new group from the longest clip left,
-        // but keep it only if at least one other clip lines up with it.
-        let root = (0..n)
-            .filter(|&u| placed[u].is_none() && !gave_up_root.contains(&u) && prints[u].is_ok())
-            .max_by(|&a, &b| prints[a].as_ref().unwrap().info.duration.partial_cmp(&prints[b].as_ref().unwrap().info.duration).unwrap());
-        let Some(root) = root else { break };
-        gave_up_root.insert(root);
-        let fr = prints[root].as_ref().unwrap();
-        let others: Vec<usize> = (0..n).filter(|&u| u != root && placed[u].is_none() && prints[u].is_ok()).collect();
-        let mut joined = false;
-        for &u in &others {
-            let fu = prints[u].as_ref().unwrap();
-            if let Some(f) = match_against(tools, &[fr], fu, cancel, false, Some(CAM_OVERLAP_S), &mut |_| {}) {
-                if f.camera_ok() && (f.sharp >= 60.0 || !clashes(&placed, &prints, u, &fr.path.to_string_lossy(), f.offset, fu.info.duration)) {
-                    placed[u] = Some(mk(fu, Some(&fr.path), f.offset, f.drift, f.score, f.confidence, f.overlap));
-                    joined = true;
+        // Write the groups back: a recorder group keeps its recorder; a camera-only group of
+        // two or more clips is anchored on its longest clip; a lone clip stays unmatched.
+        for g in 0..has_rec.len() {
+            let members: Vec<usize> = (0..n).filter(|&i| group[i] == g).collect();
+            if let Some(r) = &has_rec[g] {
+                for &i in &members {
+                    if placed[i].is_none() {
+                        let fi = prints[i].as_ref().unwrap();
+                        placed[i] = Some(mk(fi, Some(Path::new(r)), pos[i], 0.0, 0.5, "high", fi.info.duration));
+                    }
+                }
+            } else if members.len() >= 2 {
+                let root = *members.iter().max_by(|&&x, &&y| prints[x].as_ref().unwrap().info.duration.partial_cmp(&prints[y].as_ref().unwrap().info.duration).unwrap()).unwrap();
+                let fr = prints[root].as_ref().unwrap();
+                refs.push(fr.clone());
+                for &i in &members {
+                    let fi = prints[i].as_ref().unwrap();
+                    placed[i] = Some(mk(fi, Some(&fr.path), pos[i] - pos[root], 0.0, if i == root { 1.0 } else { 0.5 }, "high", fi.info.duration));
                 }
             }
         }
-        if joined {
-            placed[root] = Some(mk(fr, Some(&fr.path), 0.0, 0.0, 1.0, "high", fr.info.duration));
-            refs.push(fr.clone());
-            for t in tried.iter_mut() {
-                t.clear(); // new clips to try against
-            }
-        }
+        // Groups without a recorder go in order of their earliest recording time where known.
+        let _ = &mut done;
     }
 
     // Report every clip, placed or not (unplaced ones are shown and still exported).

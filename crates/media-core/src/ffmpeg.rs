@@ -139,7 +139,9 @@ fn parse_date(s: &str) -> Option<i64> {
 }
 
 fn parse_hms(s: &str) -> Option<f64> {
-    let p: Vec<f64> = s.split([':', ';', '-']).filter_map(|x| x.parse().ok()).collect();
+    // "10:22:31", "10:22:31.000000Z" (what cameras' ISO times look like), "10-22-31"
+    let s = s.split(['Z', '+', ' ']).next().unwrap_or(s);
+    let p: Vec<f64> = s.split([':', ';', '-']).filter_map(|x| x.trim().parse().ok()).collect();
     (p.len() >= 3).then(|| p[0] * 3600.0 + p[1] * 60.0 + p[2])
 }
 
@@ -240,4 +242,13 @@ pub fn run(mut cmd: Command, what: &str) -> Result<(), Error> {
 
 pub fn file_name(p: &Path) -> String {
     p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod hms_tests {
+    #[test]
+    fn camera_iso_time() {
+        assert_eq!(super::parse_hms("10:00:37.000000Z"), Some(36037.0));
+        assert_eq!(super::parse_hms("10:00:37"), Some(36037.0));
+    }
 }
