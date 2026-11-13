@@ -31,6 +31,8 @@ pub struct Fingerprint {
     pub feat: Vec<f32>,
     /// Raw log-energy per frame (for choosing where to refine).
     pub energy: Vec<f32>,
+    /// Spectral-peak landmarks (hash, frame), sorted by hash — see `landmarks`.
+    pub marks: Vec<(u32, u32)>,
 }
 
 pub fn fingerprint(tools: &Tools, path: &Path, cancel: &AtomicBool) -> Result<Fingerprint, Error> {
@@ -44,11 +46,13 @@ pub fn fingerprint(tools: &Tools, path: &Path, cancel: &AtomicBool) -> Result<Fi
     let mut buf: Vec<f32> = Vec::with_capacity(WIN * 4);
     let mut energy: Vec<f32> = Vec::with_capacity((info.duration * FEAT_RATE) as usize + 16);
     let mut aborted = false;
+    let mut lm = crate::landmarks::Builder::new();
     ffmpeg::stream_audio(tools, path, FEAT_SR, None, None, |chunk| {
         if aborted || cancel.load(Ordering::Relaxed) {
             aborted = true;
             return;
         }
+        lm.push(chunk);
         for &x in chunk {
             let y = a * (py + x - px);
             px = x;
@@ -67,7 +71,7 @@ pub fn fingerprint(tools: &Tools, path: &Path, cancel: &AtomicBool) -> Result<Fi
     if energy.len() < 50 {
         return Err(Error::Other(format!("{} is too short to sync (needs at least half a second of sound)", ffmpeg::file_name(path))));
     }
-    Ok(Fingerprint { path: path.to_path_buf(), info, feat: features(&energy), energy })
+    Ok(Fingerprint { path: path.to_path_buf(), info, feat: features(&energy), energy, marks: lm.finish() })
 }
 
 /// Local-contrast log energy (what's louder than the last half second), blended with onsets,
@@ -371,6 +375,8 @@ struct Found {
     overlap: f64,
     /// How tightly the raw waveforms lock together (unrelated sound: ~3–6).
     sharp: f32,
+    /// Shared spectral landmarks, when the position came from them.
+    landmarks: u32,
 }
 
 impl Found {
@@ -415,7 +421,46 @@ fn match_against(tools: &Tools, refs: &[&Fingerprint], fp: &Fingerprint, cancel:
             }
         }
     }
-    let r = refs[ri];
+    let first = fine_check(tools, refs[ri], fp, ri, coarse_offset, c);
+    if first.confidence == "high" {
+        return Some(first);
+    }
+    // The loudness pattern wasn't convincing: try where the spectral fingerprints say the
+    // clip sits (robust to a far / noisy / different microphone and to short overlaps).
+    let rank = |f: &Found| (match f.confidence { "high" => 3, "medium" => 2, "low" => 1, _ => 0 }, f.sharp as i64);
+    let mut best_f = first;
+    let mut hits: Vec<(usize, crate::landmarks::Hit)> = refs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, r)| crate::landmarks::best_lag(&r.marks, &fp.marks).filter(|h| h.strong()).map(|h| (i, h)))
+        .collect();
+    hits.sort_by(|a, b| b.1.count.cmp(&a.1.count));
+    for (i, h) in hits.into_iter().take(2) {
+        let o = h.offset_secs();
+        if (i == best_f.ri) && (o - best_f.offset).abs() < 0.1 {
+            continue;
+        }
+        let f = landmark_check(tools, refs[i], fp, i, o, h);
+        if rank(&f) > rank(&best_f) {
+            best_f = f;
+        }
+    }
+    Some(best_f)
+}
+
+/// Check a position the landmarks found, with the same waveform test.
+fn landmark_check(tools: &Tools, r: &Fingerprint, fp: &Fingerprint, ri: usize, offset: f64, h: crate::landmarks::Hit) -> Found {
+    let ov = (fp.info.duration.min(r.info.duration - offset) - (-offset).max(0.0)).max(0.0);
+    // Strong landmark evidence stands in for the loudness score.
+    let score = (0.3 + h.count as f32 / 200.0).min(0.6);
+    let c = Coarse { lag: (offset * FEAT_RATE).round() as i64, score, second: score / (h.count as f32 / h.second.max(2) as f32).max(1.0), overlap_frames: (ov * FEAT_RATE) as usize };
+    let mut f = fine_check(tools, r, fp, ri, offset, c);
+    f.landmarks = h.count;
+    f
+}
+
+/// Fine alignment at a candidate position and the confidence verdict.
+fn fine_check(tools: &Tools, r: &Fingerprint, fp: &Fingerprint, ri: usize, coarse_offset: f64, c: Coarse) -> Found {
     let ratio = c.score / c.second.max(0.02);
 
     // Fine alignment (+ drift on long clips), only inside the overlapping part.
@@ -469,7 +514,7 @@ fn match_against(tools: &Tools, refs: &[&Fingerprint], fp: &Fingerprint, cancel:
     if std::env::var_os("JOSHGRADE_DEBUG").is_some() {
         eprintln!("  [debug] {} vs {} score {:.3} second {:.3} ratio {:.2} sharp {:.1}", ffmpeg::file_name(&fp.path), ffmpeg::file_name(&r.path), c.score, c.second, ratio, sharp);
     }
-    Some(Found { ri, offset, drift, score: c.score, confidence, overlap: (c.overlap_frames as f64 / FEAT_RATE).min(dur), sharp })
+    Found { ri, offset, drift, score: c.score, confidence, overlap: (c.overlap_frames as f64 / FEAT_RATE).min(dur), sharp, landmarks: 0 }
 }
 
 /// Sync every clip against the reference recordings. With no references, the longest clip
@@ -572,7 +617,8 @@ pub fn sync(
             }
         }
         // All pairs, loudness pattern only (cheap). Pairs already in one group are skipped.
-        let mut edges: Vec<(f32, usize, usize, Coarse)> = Vec::new();
+        // (strength, a, b, loudness result, fingerprint result)
+        let mut edges: Vec<(f32, usize, usize, Option<Coarse>, Option<crate::landmarks::Hit>)> = Vec::new();
         let ok: Vec<usize> = (0..n).filter(|&i| prints[i].is_ok()).collect();
         let pairs = ok.len() * ok.len().saturating_sub(1) / 2;
         let mut k = 0usize;
@@ -591,7 +637,16 @@ pub fn sync(
                 let (fa, fb) = (prints[a].as_ref().unwrap(), prints[b].as_ref().unwrap());
                 if let Some(c) = coarse_match_ov(&fa.feat, &fb.feat, Some(CAM_OVERLAP_S)) {
                     if c.score >= 0.22 {
-                        edges.push((c.score, a, b, c));
+                        edges.push((c.score, a, b, Some(c), None));
+                    }
+                }
+                // Spectral fingerprints: finds far / noisy cameras and short overlaps.
+                if let Some(h) = crate::landmarks::best_lag(&fa.marks, &fb.marks) {
+                    if std::env::var_os("JOSHGRADE_DEBUG").is_some() && h.count >= 4 {
+                        eprintln!("  [debug] landmarks {} vs {}: {} at {:.2}s (next best {})", ffmpeg::file_name(&fb.path), ffmpeg::file_name(&fa.path), h.count, h.offset_secs(), h.second);
+                    }
+                    if h.strong() {
+                        edges.push((1.0 + h.count.min(999) as f32 / 1000.0, a, b, None, Some(h)));
                     }
                 }
             }
@@ -602,8 +657,8 @@ pub fn sync(
         // waveform check runs a handful of times per clip instead of for every pair.
         {
             let mut per: Vec<usize> = vec![0; n];
-            edges.retain(|(_, a, b, c)| {
-                let stands_out = c.score / c.second.max(0.02) >= 1.03 || c.score >= 0.45;
+            edges.retain(|(_, a, b, c, h)| {
+                let stands_out = h.is_some() || c.as_ref().is_some_and(|c| c.score / c.second.max(0.02) >= 1.03 || c.score >= 0.45);
                 let keep = stands_out && (per[*a] < 4 || per[*b] < 4);
                 if keep {
                     per[*a] += 1;
@@ -614,7 +669,7 @@ pub fn sync(
         }
         // Confirm links, strongest first.
         let checks = edges.len();
-        for (ei, (_, a, b, _)) in edges.iter().enumerate() {
+        for (ei, (_, a, b, _, hit)) in edges.iter().enumerate() {
             let (a, b) = (*a, *b);
             if cancel.load(Ordering::Relaxed) {
                 return Err(Error::Cancelled);
@@ -625,7 +680,13 @@ pub fn sync(
             }
             step(progress, format!("Lining up the cameras (check {} of {})", ei + 1, checks), done);
             let (fa, fb) = (prints[a].as_ref().unwrap(), prints[b].as_ref().unwrap());
-            let Some(f) = match_against(tools, &[fa], fb, cancel, false, Some(CAM_OVERLAP_S), &mut |_| {}) else { continue };
+            let f = match hit {
+                Some(h) => landmark_check(tools, fa, fb, 0, h.offset_secs(), *h),
+                None => {
+                    let Some(f) = match_against(tools, &[fa], fb, cancel, false, Some(CAM_OVERLAP_S), &mut |_| {}) else { continue };
+                    f
+                }
+            };
             if !f.camera_ok() {
                 continue;
             }

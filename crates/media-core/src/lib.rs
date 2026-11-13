@@ -4,6 +4,7 @@ pub mod captions;
 pub mod edit;
 pub mod export;
 pub mod ffmpeg;
+pub mod landmarks;
 pub mod sync;
 pub mod templates;
 
