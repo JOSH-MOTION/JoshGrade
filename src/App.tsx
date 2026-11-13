@@ -20,6 +20,50 @@ type Detail = {
   sharpen: number; sharpen_radius: number; sharpen_masking: number; noise: number; color_noise: number;
   texture: number; clarity: number; dehaze: number; vignette: number; vignette_midpoint: number; vignette_feather: number; grain: number; grain_size: number;
 };
+// ---------- which parts of the settings to copy / sync (like Lightroom's Synchronize Settings)
+const PARTS = [
+  { id: "grade", label: "Auto grade & look", hint: "Auto on/off, the look and its strength" },
+  { id: "light", label: "Light & colour", hint: "White balance, exposure, contrast, highlights, shadows, whites, blacks, colour mix" },
+  { id: "curve", label: "Tone curve", hint: "" },
+  { id: "detail", label: "Presence & detail", hint: "Texture, clarity, dehaze, sharpening, noise reduction" },
+  { id: "effects", label: "Vignette & grain", hint: "" },
+  { id: "retouch", label: "Retouch", hint: "Blemish removal and skin settings. Each photo finds its own spots." },
+  { id: "aimasks", label: "Masks: Person, Sky, Background", hint: "Found again on each photo" },
+  { id: "handmasks", label: "Masks: Brush, Linear, Radial", hint: "Same place on every photo" },
+  { id: "crop", label: "Crop & straighten", hint: "" },
+] as const;
+type Part = (typeof PARTS)[number]["id"];
+const DEFAULT_PARTS: Part[] = ["grade", "light", "curve", "detail", "effects", "retouch", "aimasks"];
+const EFFECT_KEYS = ["vignette", "vignette_midpoint", "vignette_feather", "grain", "grain_size"] as const;
+/** `target` with the chosen parts taken from `src`. */
+function mergeParts<S extends { auto: boolean; look: string; strength: number; adjust: unknown; curves: unknown; detail: Detail; retouch: unknown; masks: Mask[]; crop: unknown }>(
+  target: S,
+  src: S,
+  parts: Part[],
+): S {
+  const t: S = structuredClone(target);
+  const c: S = structuredClone(src);
+  const has = (p: Part) => parts.includes(p);
+  if (has("grade")) Object.assign(t, { auto: c.auto, look: c.look, strength: c.strength });
+  if (has("light")) t.adjust = c.adjust;
+  if (has("curve")) t.curves = c.curves;
+  if (has("detail") || has("effects")) {
+    const d = { ...t.detail };
+    for (const k of Object.keys(d) as (keyof Detail)[]) {
+      const fx = (EFFECT_KEYS as readonly string[]).includes(k);
+      if ((fx && has("effects")) || (!fx && has("detail"))) d[k] = c.detail[k];
+    }
+    t.detail = d;
+  }
+  if (has("retouch")) t.retouch = c.retouch;
+  if (has("aimasks") || has("handmasks")) {
+    const pick = (m: Mask) => (isAi(m.kind) ? has("aimasks") : has("handmasks"));
+    t.masks = [...c.masks.filter(pick), ...t.masks.filter((m) => !pick(m))];
+  }
+  if (has("crop")) t.crop = c.crop;
+  return t;
+}
+
 const freshDetail = (): Detail => ({
   sharpen: 0, sharpen_radius: 1, sharpen_masking: 0, noise: 0, color_noise: 0, texture: 0, clarity: 0, dehaze: 0,
   vignette: 0, vignette_midpoint: 50, vignette_feather: 50, grain: 0, grain_size: 25,
@@ -129,6 +173,19 @@ function Slider({ label, tip, value, auto = 0, onChange, min = -100, max = 100, 
   );
 }
 
+/** Fill in anything an older saved setting is missing. */
+function normalize(stored: Settings): Settings {
+  return {
+    ...stored,
+    adjust: { ...freshAdjust(), ...stored.adjust },
+    retouch: stored.retouch ?? freshRetouch(),
+    crop: stored.crop ?? freshCrop(),
+    curves: stored.curves ?? freshCurves(),
+    detail: { ...freshDetail(), ...stored.detail },
+    masks: (stored.masks ?? []).map((m) => ({ ...m, adjust: { ...freshMaskAdjust(), ...m.adjust } })),
+  };
+}
+
 export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactNode; active?: boolean }) {
   // Only the visible workspace reacts to drops and shortcuts.
   const activeRef = useRef(active);
@@ -172,15 +229,7 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
 
   const current = photos[selected] as Photo | undefined;
   const stored: Settings = (current && settingsMap[current.path]) || lastUsed;
-  const settings: Settings = {
-    ...stored,
-    adjust: { ...freshAdjust(), ...stored.adjust },
-    retouch: stored.retouch ?? freshRetouch(),
-    crop: stored.crop ?? freshCrop(),
-    curves: stored.curves ?? freshCurves(),
-    detail: { ...freshDetail(), ...stored.detail },
-    masks: (stored.masks ?? []).map((m) => ({ ...m, adjust: { ...freshMaskAdjust(), ...m.adjust } })),
-  };
+  const settings: Settings = normalize(stored);
   // Retouch engine: the face map model is downloaded once, then everything runs offline.
   const [rModel, setRModel] = useState<{ ready: boolean; size_mb: number } | null>(null);
   const [rDl, setRDl] = useState<{ got: number; total: number } | null>(null);
@@ -283,21 +332,40 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
   const canRedo = !!(current && history.current[current.path]?.future.length);
 
   // ---------- copy / paste settings, presets
-  const [clip, setClip] = useState<Settings | null>(null);
-  const copySettings = () => {
-    setClip(clone(settings));
-    setToast({ text: "Settings copied. Select another photo and press ⌘V (or Paste) to use them." });
+  // which parts Copy / Sync carry (remembered, like Lightroom's checkboxes)
+  const [parts, setParts] = useState<Part[]>(() => {
+    try {
+      const p = JSON.parse(localStorage.getItem("joshgrade.syncParts") ?? "null");
+      return Array.isArray(p) ? p : DEFAULT_PARTS;
+    } catch {
+      return DEFAULT_PARTS;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("joshgrade.syncParts", JSON.stringify(parts));
+    } catch {
+      /* not critical */
+    }
+  }, [parts]);
+  const [clip, setClip] = useState<{ s: Settings; parts: Part[] } | null>(null);
+  // the "choose what to sync" dialog: copy = put on the clipboard; sync = apply to photos now
+  const [syncDlg, setSyncDlg] = useState<null | { mode: "copy" | "sync"; scope: "selected" | "all" }>(null);
+  const copySettings = (withParts: Part[] = parts) => {
+    setClip({ s: clone(settings), parts: withParts });
+    setToast({ text: "Settings copied. Select other photos and press ⌘V (or Paste) to use them." });
+  };
+  // apply the chosen parts of `src` to some photos (one undo step each)
+  const applyParts = (src: Settings, withParts: Part[], paths: string[]) => {
+    const targets = paths.filter((p) => p !== current?.path || src !== settings);
+    for (const p of targets) remember(p, settingsMap[p] ?? lastUsed);
+    setSettingsMap((m) => ({ ...m, ...Object.fromEntries(targets.map((p) => [p, mergeParts(normalize(m[p] ?? { ...clone(lastUsed), crop: freshCrop(), masks: [] }), src, withParts)])) }));
+    return targets.length;
   };
   const pasteSettings = (targets?: string[]) => {
     if (!clip) return;
-    const paths = targets ?? (current ? [current.path] : []);
-    for (const p of paths) {
-      const prev = settingsMap[p] ?? lastUsed;
-      remember(p, prev);
-    }
-    // the crop belongs to each photo; everything else is pasted
-    setSettingsMap((m) => ({ ...m, ...Object.fromEntries(paths.map((p) => [p, { ...clone(clip), crop: (m[p] ?? lastUsed).crop ?? freshCrop() }])) }));
-    if (paths.length > 1) setToast({ text: `Pasted onto ${paths.length} photos.` });
+    const n = applyParts(clip.s, clip.parts, targets ?? (current ? [current.path] : []));
+    if (n > 1) setToast({ text: `Pasted onto ${n} photos.` });
   };
   type Preset = { name: string; settings: Settings };
   const [presets, setPresets] = useState<Preset[]>(() => {
@@ -530,7 +598,7 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
   }, [current?.path, thumbKey]);
 
   const keyActs = useRef({ undo: (_r: boolean) => {}, copy: () => {}, paste: () => {} });
-  keyActs.current = { undo, copy: copySettings, paste: () => pasteSettings(multi.size > 1 ? [...multi] : undefined) };
+  keyActs.current = { undo, copy: () => copySettings(), paste: () => pasteSettings(multi.size > 1 ? [...multi] : undefined) };
 
   // ---------- keyboard: ← → photos, hold B for original, J for clipping
   useEffect(() => {
@@ -588,13 +656,10 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
     setSelected((s) => (i < s ? s - 1 : s));
   };
 
-  const applyToAll = (paths?: string[]) => {
-    const s = clone(settings);
-    const targets = paths ?? photos.map((p) => p.path);
-    for (const p of targets) if (settingsMap[p]) remember(p, settingsMap[p]);
-    // each photo keeps its own crop
-    setSettingsMap((m) => ({ ...m, ...Object.fromEntries(targets.map((p) => [p, { ...clone(s), crop: m[p]?.crop ?? freshCrop(), masks: [...s.masks.filter((k) => isAi(k.kind)), ...(m[p]?.masks ?? []).filter((k) => !isAi(k.kind))] }])) }));
-    setToast({ text: `These settings now apply to ${paths ? targets.length : `all ${targets.length}`} photos. Each one still gets its own automatic correction.` });
+  const syncTo = (scope: "selected" | "all", withParts: Part[]) => {
+    const paths = scope === "selected" && multi.size > 1 ? [...multi] : photos.map((p) => p.path);
+    const n = applyParts(clone(settings), withParts, paths.filter((p) => p !== current?.path));
+    setToast({ text: `Synced to ${n} photo${n === 1 ? "" : "s"}. Each one still gets its own automatic correction${withParts.includes("retouch") ? " and finds its own spots" : ""}. ⌘Z on a photo undoes it there.` });
   };
 
   const resetAdjust = () => update((s) => void (s.adjust = freshAdjust()));
@@ -842,9 +907,12 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
             <button className="chip" onClick={() => undo()} disabled={!canUndo} title="Undo (⌘Z)">↶ Undo</button>
             <button className="chip" onClick={() => undo(true)} disabled={!canRedo} title="Redo (⇧⌘Z)">↷ Redo</button>
             <span className="wf-sep" />
-            <button className="chip" onClick={copySettings} disabled={!current} title="Copy settings (⌘C)">Copy</button>
+            <button className="chip" onClick={() => setSyncDlg({ mode: "copy", scope: "selected" })} disabled={!current} title="Choose what to copy (⌘C copies the same parts again)">Copy…</button>
             <button className="chip" onClick={() => pasteSettings(multi.size > 1 ? [...multi] : undefined)} disabled={!clip || !current} title="Paste settings (⌘V)">
               Paste{multi.size > 1 ? ` to ${multi.size}` : ""}
+            </button>
+            <button className="chip" onClick={() => setSyncDlg({ mode: "sync", scope: multi.size > 1 ? "selected" : "all" })} disabled={!current || photos.length < 2} title="Apply this photo's settings to other photos, choosing which parts">
+              Sync…
             </button>
             <span className="wf-sep" />
             <button className="chip" onClick={() => setNaming(naming === null ? "" : null)} disabled={!current} title="Save these settings as your own preset">Save preset</button>
@@ -1233,11 +1301,9 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
           {photos.length > 1 && (
             <>
               <button className="wide" disabled={batch?.running} onClick={saveAll}>Save all {photos.length} photos…</button>
-              {multi.size > 1 ? (
-                <button className="wide quiet" onClick={() => applyToAll([...multi])}>Use these settings for the {multi.size} selected photos</button>
-              ) : (
-                <button className="wide quiet" onClick={() => applyToAll()}>Use these settings for all photos</button>
-              )}
+              <button className="wide quiet" onClick={() => setSyncDlg({ mode: "sync", scope: multi.size > 1 ? "selected" : "all" })}>
+                {multi.size > 1 ? `Sync these settings to the ${multi.size} selected photos…` : "Sync these settings to all photos…"}
+              </button>
             </>
           )}
           <button className="wide quiet" disabled={!current || !showing} onClick={exportLut}>Export LUT for Photoshop</button>
@@ -1245,6 +1311,55 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
       </section>
 
       {dragOver && <div className="drop-veil">Drop to add</div>}
+      {syncDlg && current && (
+        <div className="modal-veil" onClick={(e) => e.target === e.currentTarget && setSyncDlg(null)}>
+          <div className="modal sync-dlg" role="dialog" aria-modal="true" aria-labelledby="sync-title" onKeyDown={(e) => e.key === "Escape" && setSyncDlg(null)}>
+            <h3 id="sync-title">{syncDlg.mode === "copy" ? "Copy settings" : "Sync settings"}</h3>
+            <p className="muted">
+              {syncDlg.mode === "copy" ? "Choose what to copy from this photo. Then select other photos and press Paste (⌘V)." : "Choose what to take from this photo to the others."}
+            </p>
+            <div className="sync-all">
+              <button className="link" onClick={() => setParts(PARTS.map((p) => p.id))}>Check all</button>
+              <button className="link" onClick={() => setParts([])}>Check none</button>
+              <button className="link" onClick={() => setParts(DEFAULT_PARTS)}>Usual</button>
+            </div>
+            <ul className="sync-parts">
+              {PARTS.map((p) => (
+                <li key={p.id}>
+                  <label className="check">
+                    <input type="checkbox" checked={parts.includes(p.id)} onChange={(e) => setParts((x) => (e.target.checked ? [...x, p.id] : x.filter((y) => y !== p.id)))} />
+                    <span>
+                      {p.label}
+                      {p.hint && <small>{p.hint}</small>}
+                    </span>
+                  </label>
+                </li>
+              ))}
+            </ul>
+            {syncDlg.mode === "sync" && multi.size > 1 && (
+              <div className="seg mini" role="radiogroup" aria-label="Sync to">
+                <button className={syncDlg.scope === "selected" ? "on" : ""} aria-pressed={syncDlg.scope === "selected"} onClick={() => setSyncDlg({ ...syncDlg, scope: "selected" })}>{multi.size} selected</button>
+                <button className={syncDlg.scope === "all" ? "on" : ""} aria-pressed={syncDlg.scope === "all"} onClick={() => setSyncDlg({ ...syncDlg, scope: "all" })}>All {photos.length} photos</button>
+              </div>
+            )}
+            <div className="modal-actions">
+              <button onClick={() => setSyncDlg(null)}>Cancel</button>
+              <button
+                className="primary"
+                autoFocus
+                disabled={!parts.length}
+                onClick={() => {
+                  if (syncDlg.mode === "copy") copySettings(parts);
+                  else syncTo(syncDlg.scope, parts);
+                  setSyncDlg(null);
+                }}
+              >
+                {syncDlg.mode === "copy" ? "Copy" : syncDlg.scope === "selected" && multi.size > 1 ? `Sync to ${multi.size - (multi.has(current.path) ? 1 : 0)} photos` : `Sync to ${photos.length - 1} photos`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {toast && (
         <div className="toast" role="status">
           <span>{toast.text}</span>
