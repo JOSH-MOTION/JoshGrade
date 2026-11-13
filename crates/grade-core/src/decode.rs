@@ -154,6 +154,56 @@ fn load_raster(path: &Path) -> Result<(DynamicImage, Orientation), Error> {
 }
 
 fn load_raw(path: &Path) -> Result<(DynamicImage, Orientation), Error> {
+    load_raw_scaled(path, None).map(|(i, o, _)| (i, o))
+}
+
+/// Open a photo for editing on screen: decoded straight to about `max_dim` on its long side
+/// (RAW files are developed, then shrunk *before* the slower colour steps, so opening is
+/// several times faster). Returns the photo, upright, and the full-size upright dimensions.
+pub fn load_preview(path: &Path, max_dim: u32) -> Result<(Photo, (u32, u32)), Error> {
+    if is_raw(path) {
+        let (mut img, o, (fw, fh)) = load_raw_scaled(path, Some(max_dim))?;
+        img.apply_orientation(o);
+        let full = if matches!(o, Orientation::Rotate90 | Orientation::Rotate270 | Orientation::Rotate90FlipH | Orientation::Rotate270FlipH) { (fh, fw) } else { (fw, fh) };
+        return Ok((to_photo(img, Some(max_dim), true), full));
+    }
+    let (mut img, o) = load_dynamic(path)?;
+    img.apply_orientation(o);
+    let full = (img.width(), img.height());
+    Ok((to_photo(img, Some(max_dim), false), full))
+}
+
+/// Box-average a linear RGB buffer down so its long side is about `max_dim` (whole factor).
+fn shrink_linear(flat: &[f32], w: usize, h: usize, max_dim: u32) -> (Vec<f32>, usize, usize) {
+    let f = (w.max(h) as f32 / max_dim as f32).floor().max(1.0) as usize;
+    if f <= 1 {
+        return (flat.to_vec(), w, h);
+    }
+    let (nw, nh) = (w / f, h / f);
+    use rayon::prelude::*;
+    let mut out = vec![0f32; nw * nh * 3];
+    out.par_chunks_mut(nw * 3).enumerate().for_each(|(y, row)| {
+        for x in 0..nw {
+            let mut acc = [0f32; 3];
+            for yy in y * f..(y + 1) * f {
+                let base = (yy * w + x * f) * 3;
+                for xx in 0..f {
+                    let p = base + xx * 3;
+                    acc[0] += flat[p];
+                    acc[1] += flat[p + 1];
+                    acc[2] += flat[p + 2];
+                }
+            }
+            let n = (f * f) as f32;
+            row[x * 3] = acc[0] / n;
+            row[x * 3 + 1] = acc[1] / n;
+            row[x * 3 + 2] = acc[2] / n;
+        }
+    });
+    (out, nw, nh)
+}
+
+fn load_raw_scaled(path: &Path, max_dim: Option<u32>) -> Result<(DynamicImage, Orientation, (u32, u32)), Error> {
     use rawler::decoders::RawDecodeParams;
     use rawler::imgop::develop::{Intermediate, ProcessingStep, RawDevelop};
     use rawler::rawsource::RawSource;
@@ -183,26 +233,19 @@ fn load_raw(path: &Path) -> Result<(DynamicImage, Orientation), Error> {
         ProcessingStep::CropDefault,
     ]);
     let inter = develop.develop_intermediate(&rawimage).map_err(raw_err)?;
-    let (w, h, flat): (usize, usize, Vec<f32>) = match inter {
-        Intermediate::ThreeColor(px) => (
-            px.width,
-            px.height,
-            px.data.iter().flat_map(|p| p.iter().map(|v| to_display(*v))).collect(),
-        ),
-        Intermediate::Monochrome(px) => (
-            px.width,
-            px.height,
-            px.data.iter().flat_map(|v| {
-                let d = to_display(*v);
-                [d, d, d]
-            }).collect(),
-        ),
-        Intermediate::FourColor(px) => (
-            px.width,
-            px.height,
-            px.data.iter().flat_map(|p| [to_display(p[0]), to_display(p[1]), to_display(p[2])]).collect(),
-        ),
+    // linear first (shrinking, if asked, happens in linear light), display encoding after
+    let (w, h, lin): (usize, usize, Vec<f32>) = match inter {
+        Intermediate::ThreeColor(px) => (px.width, px.height, px.data.iter().flat_map(|p| p.iter().copied()).collect()),
+        Intermediate::Monochrome(px) => (px.width, px.height, px.data.iter().flat_map(|v| [*v, *v, *v]).collect()),
+        Intermediate::FourColor(px) => (px.width, px.height, px.data.iter().flat_map(|p| [p[0], p[1], p[2]]).collect()),
     };
+    let full_dims = (w as u32, h as u32);
+    let (lin, w, h) = match max_dim {
+        Some(m) => shrink_linear(&lin, w, h, m),
+        None => (lin, w, h),
+    };
+    use rayon::prelude::*;
+    let flat: Vec<f32> = lin.par_iter().map(|v| to_display(*v)).collect();
     let mut flat = flat;
     // Look like the camera: fit the camera's own rendering (its embedded JPEG) and apply it
     // to the RAW data, so colours and brightness match what you saw on the back of the
@@ -223,7 +266,7 @@ fn load_raw(path: &Path) -> Result<(DynamicImage, Orientation), Error> {
     }
     let buf = Rgb32FImage::from_raw(w as u32, h as u32, flat)
         .ok_or_else(|| Error::Raw("RAW buffer size mismatch".into()))?;
-    Ok((DynamicImage::ImageRgb32F(buf), orientation))
+    Ok((DynamicImage::ImageRgb32F(buf), orientation, full_dims))
 }
 
 /// Turn a photo by an EXIF orientation (or undo it with `inverse`).

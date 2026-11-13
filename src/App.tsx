@@ -551,7 +551,12 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
   };
 
   // ---------- live preview
+  // One render at a time, always of the latest settings: while one is being made, slider
+  // moves just update what the next one will be (no pile-up of stale renders).
   const reqId = useRef(0);
+  const inflight = useRef(false);
+  const prefetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const queued = useRef<null | (() => void)>(null);
   const settingsKey = JSON.stringify({ ...settings, crop: { r: settings.crop.rot90, f: settings.crop.flip_h } });
   useEffect(() => {
     if (!current) {
@@ -562,7 +567,8 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
     setBeforeUrl(beforeCache.current[path] ?? null);
     const id = ++reqId.current;
     setLoading(true);
-    const t = setTimeout(() => {
+    const run = () => {
+      inflight.current = true;
       invoke<Preview & { before?: string | null }>("preview", { path, settings: eff(settings), withBefore: !beforeCache.current[path], clipping })
         .then((p) => {
           if (p.before) beforeCache.current[path] = p.before;
@@ -570,13 +576,32 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
             setBeforeUrl(beforeCache.current[path] ?? null);
             setPreview({ ...p, path });
             setError(null);
+            // get the neighbours ready in the background, like Lightroom
+            // (after a pause, so it doesn't slow down slider moves)
+            if (prefetchTimer.current) clearTimeout(prefetchTimer.current);
+            prefetchTimer.current = setTimeout(() => {
+              const i = photos.findIndex((x) => x.path === path);
+              const near = [photos[i + 1]?.path, photos[i - 1]?.path].filter(Boolean);
+              if (near.length) invoke("prefetch", { paths: near }).catch(() => {});
+            }, 1500);
           }
         })
         .catch((e) => {
           if (id === reqId.current) setError(String(e));
         })
-        .finally(() => id === reqId.current && setLoading(false));
-    }, 70);
+        .finally(() => {
+          if (id === reqId.current) setLoading(false);
+          inflight.current = false;
+          const next = queued.current;
+          queued.current = null;
+          next?.();
+        });
+    };
+    if (prefetchTimer.current) clearTimeout(prefetchTimer.current);
+    const t = setTimeout(() => {
+      if (inflight.current) queued.current = run;
+      else run();
+    }, 16);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [current?.path, settingsKey, clipping, rModel?.ready]);

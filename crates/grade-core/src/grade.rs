@@ -223,6 +223,60 @@ impl Grade {
     }
 
     pub fn apply(&self, photo: &Photo) -> Photo {
+        // Big images: bake the grade into a 3D table once and look pixels up in it (the same
+        // trick a .cube LUT uses) — several times faster than working every pixel out.
+        if photo.data.len() > 150_000 {
+            let lut = self.bake(LUT_N);
+            let data = photo.data.par_iter().map(|p| lut_lookup(&lut, LUT_N, *p)).collect();
+            return Photo { width: photo.width, height: photo.height, data, from_raw: photo.from_raw };
+        }
+        let data = photo.data.par_iter().map(|p| self.apply_px(*p)).collect();
+        Photo { width: photo.width, height: photo.height, data, from_raw: photo.from_raw }
+    }
+
+    /// The grade sampled on an n×n×n grid (r fastest).
+    pub fn bake(&self, n: usize) -> Vec<Rgb> {
+        let s = (n - 1) as f32;
+        (0..n * n * n)
+            .into_par_iter()
+            .map(|i| {
+                let (r, g, b) = (i % n, (i / n) % n, i / (n * n));
+                self.apply_px([r as f32 / s, g as f32 / s, b as f32 / s])
+            })
+            .collect()
+    }
+}
+
+const LUT_N: usize = 41;
+
+/// Trilinear lookup in a baked grade.
+#[inline]
+fn lut_lookup(lut: &[Rgb], n: usize, c: Rgb) -> Rgb {
+    let s = (n - 1) as f32;
+    let f = c.map(|v| v.clamp(0.0, 1.0) * s);
+    let i = f.map(|v| (v as usize).min(n - 2));
+    let t = [f[0] - i[0] as f32, f[1] - i[1] as f32, f[2] - i[2] as f32];
+    let at = |r: usize, g: usize, b: usize| lut[(b * n + g) * n + r];
+    let mut out = [0f32; 3];
+    for (dr, wr) in [(0, 1.0 - t[0]), (1, t[0])] {
+        for (dg, wg) in [(0, 1.0 - t[1]), (1, t[1])] {
+            for (db, wb) in [(0, 1.0 - t[2]), (1, t[2])] {
+                let w = wr * wg * wb;
+                if w > 0.0 {
+                    let v = at(i[0] + dr, i[1] + dg, i[2] + db);
+                    out[0] += v[0] * w;
+                    out[1] += v[1] * w;
+                    out[2] += v[2] * w;
+                }
+            }
+        }
+    }
+    out
+}
+
+impl Grade {
+    /// Every pixel worked out exactly (used for the LUT test and small images).
+    pub fn apply_exact(&self, photo: &Photo) -> Photo {
         let data = photo.data.par_iter().map(|p| self.apply_px(*p)).collect();
         Photo { width: photo.width, height: photo.height, data, from_raw: photo.from_raw }
     }

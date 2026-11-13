@@ -113,7 +113,7 @@ pub fn save_graded(input: &Path, output: &Path, settings: &Settings, format: Out
     }
     let seg = if masks::needs_ai(&settings.masks) && masks::active(&settings.masks) { Some(masks::segment(&small).map_err(Error::Retouch)?) } else { None };
     drop(small);
-    let graded = grade.apply(&full);
+    let graded = grade.apply_exact(&full);
     let graded = masks::apply(&graded, &settings.masks, seg.as_ref(), &masks::View::whole(&graded));
     let graded = finish(&graded, settings);
     drop(full);

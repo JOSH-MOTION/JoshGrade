@@ -42,10 +42,19 @@ fn to_u8(photo: &Photo) -> Vec<u8> {
 }
 
 pub fn jpeg_bytes(photo: &Photo, quality: u8) -> Result<Vec<u8>, Error> {
+    // jpeg-encoder (SIMD) is several times faster than image's encoder — this runs on every
+    // slider move for the preview.
     let mut buf = Vec::new();
-    let enc = JpegEncoder::new_with_quality(&mut buf, quality);
-    enc.write_image_compat(&to_u8(photo), photo.width, photo.height)?;
-    Ok(buf)
+    let enc = jpeg_encoder::Encoder::new(&mut buf, quality);
+    match enc.encode(&to_u8(photo), photo.width as u16, photo.height as u16, jpeg_encoder::ColorType::Rgb) {
+        Ok(()) => Ok(buf),
+        Err(_) => {
+            let mut buf = Vec::new();
+            let enc = JpegEncoder::new_with_quality(&mut buf, quality);
+            enc.write_image_compat(&to_u8(photo), photo.width, photo.height)?;
+            Ok(buf)
+        }
+    }
 }
 
 trait WriteCompat {

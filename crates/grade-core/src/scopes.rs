@@ -110,7 +110,7 @@ pub fn band_stats(px: &[Rgb]) -> Vec<BandStat> {
 }
 
 pub fn compute(photo: &Photo) -> Scopes {
-    let step = (photo.data.len() / 250_000).max(1);
+    let step = (photo.data.len() / 60_000).max(1);
     let px: Vec<Rgb> = photo.data.iter().step_by(step).copied().collect();
     let n = px.len().max(1) as f32;
 

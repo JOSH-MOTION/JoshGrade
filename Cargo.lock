@@ -1812,6 +1812,7 @@ version = "0.1.0"
 dependencies = [
  "grade-core",
  "image",
+ "rawler",
  "rayon",
  "serde_json",
 ]
@@ -1822,6 +1823,7 @@ version = "0.1.0"
 dependencies = [
  "image",
  "img-parts",
+ "jpeg-encoder",
  "rawler",
  "rayon",
  "serde",
@@ -2488,6 +2490,12 @@ dependencies = [
  "ureq",
  "whisper-rs",
 ]
+
+[[package]]
+name = "jpeg-encoder"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b454d911ac55068f53495488d8ccd0646eaa540c033a28ee15b07838afafb01f"
 
 [[package]]
 name = "js-sys"

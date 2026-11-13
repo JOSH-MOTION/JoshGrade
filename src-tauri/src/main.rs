@@ -165,10 +165,8 @@ fn cached(state: &AppState, path: &str) -> Result<Arc<Entry>, String> {
     if let Some(v) = state.cache.lock().unwrap().get(path) {
         return Ok(v.clone());
     }
-    let (mut img, o) = decode::load_dynamic(Path::new(path)).map_err(|e| e.to_string())?;
-    img.apply_orientation(o);
-    let full_dims = (img.width(), img.height());
-    let photo = decode::to_photo(img, Some(grade_core::ANALYSIS_SIZE), decode::is_raw(Path::new(path)));
+    // decoded straight to screen size (RAW: shrunk before the slow colour steps)
+    let (photo, full_dims) = decode::load_preview(Path::new(path), grade_core::ANALYSIS_SIZE).map_err(|e| e.to_string())?;
     let analysis = grade_core::analyze(&photo);
     let before_url = jpeg_url(&photo, 88)?;
     let before_scopes = scopes::compute(&photo);
@@ -184,6 +182,20 @@ fn cached(state: &AppState, path: &str) -> Result<Arc<Entry>, String> {
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
     tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())?
+}
+
+/// Get the next photos ready in the background (like Lightroom's preview cache), so moving
+/// to them is instant.
+#[tauri::command]
+async fn prefetch(state: St<'_>, paths: Vec<String>) -> Result<(), String> {
+    let st = Arc::clone(&state);
+    blocking(move || {
+        for p in paths.iter().take(2) {
+            let _ = cached(&st, p);
+        }
+        Ok(())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -604,6 +616,7 @@ fn main() {
             mask_model,
             mask_download,
             mask_overlay,
+            prefetch,
             jobs::jobs_list,
             jobs::job_cancel,
             jobs::jobs_clear,
