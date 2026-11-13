@@ -5,6 +5,7 @@ use base64::Engine;
 use grade_core::scopes::{self, Scopes};
 use grade_core::report::{self, Line, Measure};
 use grade_core::retouch::{self, Face, RetouchSettings};
+use grade_core::output::ExportOptions;
 use grade_core::{decode, encode, geometry, lut, masks, Adjust, Analysis, Grade, OutputFormat, Photo, Settings};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -158,6 +159,8 @@ struct BatchRequest {
     format: OutputFormat,
     write_lut: bool,
     out_dir: String,
+    #[serde(default)]
+    opts: ExportOptions,
 }
 
 #[derive(Serialize, Clone)]
@@ -452,11 +455,12 @@ fn format_for(dest: &Path, fallback: OutputFormat) -> OutputFormat {
 
 /// Save one photo, full resolution, exactly where you chose.
 #[tauri::command]
-async fn save_photo(path: String, settings: Settings, dest: String, format: OutputFormat, write_lut: bool) -> Result<String, String> {
+async fn save_photo(path: String, settings: Settings, dest: String, format: OutputFormat, write_lut: bool, opts: Option<ExportOptions>) -> Result<String, String> {
     blocking(move || {
         let dest = PathBuf::from(dest);
         let fmt = format_for(&dest, format);
-        let r = grade_core::save_graded(Path::new(&path), &dest, &settings, fmt, 95, write_lut).map_err(|e| e.to_string())?;
+        let opts = opts.unwrap_or_default();
+        let r = grade_core::save_graded_with(Path::new(&path), &dest, &settings, fmt, &opts, write_lut).map_err(|e| e.to_string())?;
         Ok(r.output.to_string_lossy().into_owned())
     })
     .await
@@ -510,8 +514,8 @@ async fn save_batch(app: tauri::AppHandle, state: St<'_>, req: BatchRequest) -> 
                 break;
             }
             let input = PathBuf::from(&item.path);
-            let dest = grade_core::unique_output(&input, &dir, req.format);
-            let ev = match grade_core::save_graded(&input, &dest, &item.settings, req.format, 95, req.write_lut) {
+            let dest = grade_core::output::output_path(&input, &dir, &req.opts.rename, i + 1, &item.settings.look, req.format.extension());
+            let ev = match grade_core::save_graded_with(&input, &dest, &item.settings, req.format, &req.opts, req.write_lut) {
                 Ok(r) => {
                     done += 1;
                     Progress { index: i, total, file: item.path.clone(), ok: true, output: Some(r.output.to_string_lossy().into_owned()), error: None }
@@ -591,6 +595,48 @@ async fn mask_overlay(state: St<'_>, path: String, settings: Settings, index: us
         png_url(&img)
     })
     .await
+}
+
+/// Focus mask (like Capture One): green where the photo is in sharp focus.
+#[tauri::command]
+async fn focus_mask(state: St<'_>, path: String, settings: Settings) -> Result<String, String> {
+    let st = Arc::clone(&state);
+    blocking(move || {
+        let e = cached(&st, &path)?;
+        let shown = e.lensed(&e.photo, &settings.lens);
+        let v = grade_core::output::focus_mask(&shown);
+        let p = Photo { width: shown.width, height: shown.height, data: v.iter().map(|&a| [a, a, a]).collect(), from_raw: false };
+        let p = geometry::turn(&p, settings.crop.rot90, settings.crop.flip_h);
+        let img = image::RgbaImage::from_fn(p.width, p.height, |x, y| {
+            let a = p.data[(y * p.width + x) as usize][0];
+            image::Rgba([70, 255, 90, (a * 210.0) as u8])
+        });
+        png_url(&img)
+    })
+    .await
+}
+
+fn catalog_file(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    use tauri::Manager;
+    Ok(app.path().app_data_dir().map_err(|e| e.to_string())?.join("catalog.json"))
+}
+
+/// Your edits, ratings and snapshots, kept between launches (like a Lightroom catalog).
+#[tauri::command]
+fn catalog_load(app: tauri::AppHandle) -> Option<String> {
+    std::fs::read_to_string(catalog_file(&app).ok()?).ok()
+}
+
+#[tauri::command]
+fn catalog_save(app: tauri::AppHandle, json: String) -> Result<(), String> {
+    let f = catalog_file(&app)?;
+    if let Some(d) = f.parent() {
+        std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+    }
+    // write then rename, so a crash never leaves half a catalog
+    let tmp = f.with_extension("json.tmp");
+    std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &f).map_err(|e| e.to_string())
 }
 
 #[derive(Serialize)]
@@ -688,6 +734,9 @@ fn main() {
             collect_photos,
             thumbnail,
             preview,
+            focus_mask,
+            catalog_load,
+            catalog_save,
             look_thumbs,
             export_lut,
             save_photo,

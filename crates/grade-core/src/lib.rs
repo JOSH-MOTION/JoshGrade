@@ -19,6 +19,7 @@ pub mod learn;
 pub mod looks;
 pub mod lens;
 pub mod lut;
+pub mod output;
 pub mod spots;
 pub mod masks;
 pub mod report;
@@ -134,6 +135,13 @@ pub fn unique_output(input: &Path, dir: &Path, format: OutputFormat) -> PathBuf 
 
 /// Grade one file at full resolution and save it exactly at `output`.
 pub fn save_graded(input: &Path, output: &Path, settings: &Settings, format: OutputFormat, quality: u8, write_lut: bool) -> Result<SaveResult, Error> {
+    let o = output::ExportOptions { quality, ..Default::default() };
+    save_graded_with(input, output, settings, format, &o, write_lut)
+}
+
+/// Like [`save_graded`], with export options (resize, output sharpening, watermark, quality).
+pub fn save_graded_with(input: &Path, output: &Path, settings: &Settings, format: OutputFormat, opts: &output::ExportOptions, write_lut: bool) -> Result<SaveResult, Error> {
+    let quality = opts.quality.clamp(1, 100);
     // Pixels are always saved upright (EXIF is copied with its orientation reset).
     let (mut img, orientation) = decode::load_dynamic(input)?;
     img.apply_orientation(orientation);
@@ -167,6 +175,7 @@ pub fn save_graded(input: &Path, output: &Path, settings: &Settings, format: Out
     let graded = masks::apply(&graded, &settings.masks, seg.as_ref(), &masks::View::whole(&graded));
     let graded = finish(&graded, settings);
     drop(full);
+    let graded = if opts.changes_pixels() { output::apply(graded, opts) } else { graded };
 
     if let Some(dir) = output.parent() {
         std::fs::create_dir_all(dir)?;

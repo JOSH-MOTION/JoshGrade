@@ -92,6 +92,18 @@ const freshLens = (): Lens => ({
 });
 type ReportLine = { key: string; label: string; before: string; after: string; verdict: string; status: "good" | "warn" | "info" };
 type Photo = { path: string; name: string; thumb?: string; saved?: string; error?: string };
+/** Star rating 0..5 and flag: 1 pick, -1 reject (like Lightroom). */
+type Mark = { r: number; f: number };
+type Snapshot = { name: string; at: number; settings: Settings };
+type Filter = "all" | "picks" | "unrejected" | "rejected" | "1" | "2" | "3" | "4" | "5" | "edited";
+type ExportOpts = {
+  long_edge: number; quality: number; sharpen: "none" | "screen" | "matte" | "glossy"; sharpen_amount: "low" | "standard" | "high";
+  rename: string; watermark: { text: string; size: number; opacity: number; position: string; dark: boolean };
+};
+const freshExport = (): ExportOpts => ({
+  long_edge: 0, quality: 92, sharpen: "none", sharpen_amount: "standard", rename: "",
+  watermark: { text: "", size: 3, opacity: 70, position: "br", dark: false },
+});
 type Preview = {
   path: string; after: string; overlay?: string | null; width: number; height: number;
   report: ReportLine[]; auto_adjust: Adjust; scopes_before: ScopeData; scopes_after: ScopeData; full_width: number; full_height: number;
@@ -223,6 +235,27 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [selected, setSelected] = useState(0);
   const [settingsMap, setSettingsMap] = useState<Record<string, Settings>>({});
+  const [marks, setMarks] = useState<Record<string, Mark>>({});
+  const [snapshots, setSnapshots] = useState<Record<string, Snapshot[]>>({});
+  const [filter, setFilter] = useState<Filter>("all");
+  const [focusMask, setFocusMask] = useState(false);
+  const [focusUrl, setFocusUrl] = useState<string | null>(null);
+  const [exp, setExp] = useState<ExportOpts>(() => {
+    try {
+      const e = JSON.parse(localStorage.getItem("joshgrade.export") ?? "{}");
+      return { ...freshExport(), ...e, watermark: { ...freshExport().watermark, ...e.watermark } };
+    } catch {
+      return freshExport();
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("joshgrade.export", JSON.stringify(exp));
+    } catch {
+      /* ignore */
+    }
+  }, [exp]);
+  const [showExport, setShowExport] = useState(false);
   const [multi, setMulti] = useState<Set<string>>(new Set());
   const [lastUsed, setLastUsed] = useState<Settings>(freshSettings);
   const [preview, setPreview] = useState<Preview | null>(null);
@@ -309,7 +342,7 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
   };
   // A photo takes your latest settings the first time you open it, then keeps its own.
   useEffect(() => {
-    if (current && !settingsMap[current.path]) setSettingsMap((m) => ({ ...m, [current.path]: { ...clone(lastUsed), crop: freshCrop(), masks: [] } }));
+    if (current && !settingsMap[current.path]) setSettingsMap((m) => ({ ...m, [current.path]: { ...clone(lastUsed), crop: freshCrop(), masks: [], spots: [] } }));
   }, [current?.path]);
 
   // ---------- history (undo / redo), per photo
@@ -339,7 +372,7 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
         fn(s);
         if (JSON.stringify(s) === JSON.stringify(prev)) return m;
         remember(current.path, prev);
-        setLastUsed({ ...clone(s), crop: freshCrop(), masks: [] });
+        setLastUsed({ ...clone(s), crop: freshCrop(), masks: [], spots: [] });
         return { ...m, [current.path]: s };
       });
     },
@@ -388,7 +421,7 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
   const applyParts = (src: Settings, withParts: Part[], paths: string[]) => {
     const targets = paths.filter((p) => p !== current?.path || src !== settings);
     for (const p of targets) remember(p, settingsMap[p] ?? lastUsed);
-    setSettingsMap((m) => ({ ...m, ...Object.fromEntries(targets.map((p) => [p, mergeParts(normalize(m[p] ?? { ...clone(lastUsed), crop: freshCrop(), masks: [] }), src, withParts)])) }));
+    setSettingsMap((m) => ({ ...m, ...Object.fromEntries(targets.map((p) => [p, mergeParts(normalize(m[p] ?? { ...clone(lastUsed), crop: freshCrop(), masks: [], spots: [] }), src, withParts)])) }));
     return targets.length;
   };
   const pasteSettings = (targets?: string[]) => {
@@ -531,6 +564,22 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
   const setMask = (i: number, fn: (m: Mask) => void) => update((s) => void fn(s.masks[i]));
   const setMaskAdj = (key: keyof MaskAdjust) => (v: number) => maskSel !== null && setMask(maskSel, (m) => void (m.adjust[key] = v));
   // red overlay showing where the selected mask is
+  // focus mask (F): green where the photo is sharp
+  const focusKey = focusMask && current ? JSON.stringify([current.path, settings.lens, settings.crop.rot90, settings.crop.flip_h]) : "";
+  useEffect(() => {
+    if (!focusKey || !current) {
+      setFocusUrl(null);
+      return;
+    }
+    let cancelled = false;
+    invoke<string>("focus_mask", { path: current.path, settings: eff(settings) })
+      .then((u) => !cancelled && setFocusUrl(u))
+      .catch(() => !cancelled && setFocusUrl(null));
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusKey]);
   const overlayKey = selMask && maskOverlay ? JSON.stringify({ m: { ...selMask, adjust: 0, amount: 0, name: 0, enabled: 0 }, r: settings.crop.rot90, f: settings.crop.flip_h, ready: mModel?.ready }) : "";
   useEffect(() => {
     if (!overlayKey || !current || maskSel === null) {
@@ -556,8 +605,9 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
 
   // ---------- adding photos
   const addPaths = useCallback(
-    async (paths: string[]) => {
+    async (paths: string[], quiet = false) => {
       const { photos: found, skipped } = await invoke<{ photos: string[]; skipped: string[] }>("collect_photos", { paths });
+      if (quiet && found.length === 0) return;
       if (found.length === 0) {
         const what = skipped.length ? `“${baseName(skipped[0])}”${skipped.length > 1 ? ` and ${skipped.length - 1} more` : ""}` : "That";
         setToast({ text: `${what} isn't a photo JoshGrade can open. It reads JPEG, PNG, TIFF, WebP, HEIC and camera RAW (CR3, CR2, NEF, ARW, RAF, DNG…).` });
@@ -569,10 +619,66 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
         if (prev.length === 0) setSelected(0);
         return [...prev, ...fresh];
       });
-      if (skipped.length) setToast({ text: `Added ${found.length} photo${found.length > 1 ? "s" : ""}. Skipped ${skipped.length} file${skipped.length > 1 ? "s" : ""} that ${skipped.length > 1 ? "aren't photos" : "isn't a photo"}.` });
+      if (skipped.length && !quiet) setToast({ text: `Added ${found.length} photo${found.length > 1 ? "s" : ""}. Skipped ${skipped.length} file${skipped.length > 1 ? "s" : ""} that ${skipped.length > 1 ? "aren't photos" : "isn't a photo"}.` });
     },
     [],
   );
+
+  // ---------- catalog: edits, ratings and snapshots survive closing the app
+  const catalogReady = useRef(false);
+  const pendingSel = useRef<string | null>(null);
+  useEffect(() => {
+    invoke<string | null>("catalog_load")
+      .then((j) => {
+        if (!j) return;
+        const c = JSON.parse(j);
+        if (c.settings) setSettingsMap((m) => ({ ...c.settings, ...m }));
+        if (c.marks) setMarks((m) => ({ ...c.marks, ...m }));
+        if (c.snapshots) setSnapshots((m) => ({ ...c.snapshots, ...m }));
+        if (c.lastUsed) setLastUsed(normalize(c.lastUsed));
+        if (Array.isArray(c.photos) && c.photos.length) {
+          pendingSel.current = c.selected ?? null;
+          addPaths(c.photos, true);
+        }
+      })
+      .catch(() => {})
+      .finally(() => (catalogReady.current = true));
+  }, []);
+  useEffect(() => {
+    if (!pendingSel.current) return;
+    const i = photos.findIndex((p) => p.path === pendingSel.current);
+    if (i >= 0) {
+      setSelected(i);
+      pendingSel.current = null;
+    }
+  }, [photos]);
+  useEffect(() => {
+    if (!catalogReady.current) return;
+    const t = setTimeout(() => {
+      const keep = new Set(photos.map((p) => p.path));
+      // keep edits for photos that were removed from the list too (they come back if re-added)
+      const json = JSON.stringify({ v: 1, photos: photos.map((p) => p.path), selected: current?.path ?? null, settings: settingsMap, marks, snapshots, lastUsed, n: keep.size });
+      invoke("catalog_save", { json }).catch(() => {});
+    }, 1200);
+    return () => clearTimeout(t);
+  }, [photos.length, current?.path, settingsMap, marks, snapshots, lastUsed]);
+
+  // ---------- ratings, flags and the filter
+  const markOf = (path: string): Mark => marks[path] ?? { r: 0, f: 0 };
+  const setMark = (paths: string[], m: Partial<Mark>) => setMarks((all) => ({ ...all, ...Object.fromEntries(paths.map((p) => [p, { ...(all[p] ?? { r: 0, f: 0 }), ...m }])) }));
+  const passes = (p: Photo) => {
+    const m = markOf(p.path);
+    switch (filter) {
+      case "all": return true;
+      case "picks": return m.f === 1;
+      case "unrejected": return m.f !== -1;
+      case "rejected": return m.f === -1;
+      case "edited": return !!settingsMap[p.path] && JSON.stringify(normalize(settingsMap[p.path]).adjust) !== JSON.stringify(freshAdjust());
+      default: return m.r >= +filter;
+    }
+  };
+  const visibleIdx = photos.map((p, i) => (passes(p) ? i : -1)).filter((i) => i >= 0);
+  const targetsForMark = () => (multi.size > 1 ? [...multi] : current ? [current.path] : []);
 
   useEffect(() => {
     invoke<Look[]>("list_looks").then(setLooks);
@@ -691,8 +797,20 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [current?.path, thumbKey]);
 
-  const keyActs = useRef({ undo: (_r: boolean) => {}, copy: () => {}, paste: () => {} });
-  keyActs.current = { undo, copy: () => copySettings(), paste: () => pasteSettings(multi.size > 1 ? [...multi] : undefined) };
+  const keyActs = useRef({ undo: (_r: boolean) => {}, copy: () => {}, paste: () => {}, mark: (_m: Partial<Mark>) => {}, nav: (_d: number) => {} });
+  keyActs.current = {
+    undo,
+    copy: () => copySettings(),
+    paste: () => pasteSettings(multi.size > 1 ? [...multi] : undefined),
+    mark: (m) => setMark(targetsForMark(), m),
+    nav: (d) => {
+      if (!visibleIdx.length) return;
+      const pos = visibleIdx.indexOf(selected);
+      const next = pos < 0 ? visibleIdx.find((i) => (d > 0 ? i > selected : i < selected)) ?? visibleIdx[0] : visibleIdx[Math.max(0, Math.min(visibleIdx.length - 1, pos + d))];
+      setMulti(new Set());
+      setSelected(next);
+    },
+  };
 
   // ---------- keyboard: ← → photos, hold B for original, J for clipping
   useEffect(() => {
@@ -716,8 +834,14 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
         }
         return;
       }
-      if (e.key === "ArrowDown") setSelected((s) => Math.min(s + 1, photos.length - 1));
-      if (e.key === "ArrowUp") setSelected((s) => Math.max(s - 1, 0));
+      if (e.key === "ArrowDown") keyActs.current.nav(1);
+      if (e.key === "ArrowUp") keyActs.current.nav(-1);
+      // ratings and flags (Lightroom keys): 0-5 stars, P pick, X reject, U unflag
+      if (/^[0-5]$/.test(e.key) && (e.target as HTMLElement).tagName !== "INPUT") keyActs.current.mark({ r: +e.key });
+      if (e.key.toLowerCase() === "p" && !e.repeat) keyActs.current.mark({ f: 1 });
+      if (e.key.toLowerCase() === "x" && !e.repeat) keyActs.current.mark({ f: -1 });
+      if (e.key.toLowerCase() === "u" && !e.repeat) keyActs.current.mark({ f: 0 });
+      if (e.key.toLowerCase() === "f" && !e.repeat) setFocusMask((f) => !f);
       if (e.key.toLowerCase() === "b" && !e.repeat) setShowBefore(true);
       if (e.key.toLowerCase() === "j" && !e.repeat) setClipping((c) => !c);
       if (e.key.toLowerCase() === "c" && !e.repeat) setCropMode((c) => !c);
@@ -782,7 +906,7 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
     if (!dest) return;
     setToast({ text: `Saving ${baseName(dest)}…` });
     try {
-      const out = await invoke<string>("save_photo", { path: current.path, settings: eff(settings), dest, format, writeLut });
+      const out = await invoke<string>("save_photo", { path: current.path, settings: eff(settings), dest, format, writeLut, opts: exp });
       setPhotos((prev) => prev.map((p) => (p.path === current.path ? { ...p, saved: out, error: undefined } : p)));
       setToast({ text: `Saved ${baseName(out)}`, reveal: out });
     } catch (e) {
@@ -802,13 +926,14 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
   };
 
   const saveAll = async () => {
-    if (!photos.length) return;
-    const dir = await open({ directory: true, title: "Choose a folder for the graded photos", defaultPath: dirName(photos[0].path) });
+    const list = visibleIdx.map((i) => photos[i]);
+    if (!list.length) return;
+    const dir = await open({ directory: true, title: "Choose a folder for the graded photos", defaultPath: dirName(list[0].path) });
     if (typeof dir !== "string") return;
-    setBatch({ done: 0, total: photos.length, running: true, dir, failed: 0 });
+    setBatch({ done: 0, total: list.length, running: true, dir, failed: 0 });
     try {
       await invoke("save_batch", {
-        req: { items: photos.map((p) => ({ path: p.path, settings: eff(settingsMap[p.path] ?? lastUsed) })), format, write_lut: writeLut, out_dir: dir },
+        req: { items: list.map((p) => ({ path: p.path, settings: eff(settingsMap[p.path] ?? lastUsed) })), format, write_lut: writeLut, out_dir: dir, opts: exp },
       });
     } catch (e) {
       setToast({ text: String(e) });
@@ -872,8 +997,8 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
           <p className="strip-empty">Your photos will appear here.</p>
         ) : (
           <ul>
-            {photos.map((p, i) => (
-              <li key={p.path} className={i === selected ? "on" : ""}>
+            {photos.map((p, i) => !passes(p) ? null : (
+              <li key={p.path} className={`${i === selected ? "on" : ""} ${markOf(p.path).f === -1 ? "rejected" : ""}`}>
                 <button
                   className={`strip-item ${multi.has(p.path) ? "multi" : ""}`}
                   onClick={(e) => {
@@ -897,13 +1022,41 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
                   <span className="strip-name">{p.name}</span>
                   {p.saved && <span className="badge ok" title={p.saved}>Saved</span>}
                   {p.error && <span className="badge err" title={p.error}>Failed</span>}
+                  {(markOf(p.path).r > 0 || markOf(p.path).f !== 0) && (
+                    <span className="marks" aria-label={`${markOf(p.path).r} stars${markOf(p.path).f === 1 ? ", picked" : markOf(p.path).f === -1 ? ", rejected" : ""}`}>
+                      {markOf(p.path).f === 1 && <span className="flag pick">⚑</span>}
+                      {markOf(p.path).f === -1 && <span className="flag rej">✕</span>}
+                      {markOf(p.path).r > 0 && <span className="stars">{"★".repeat(markOf(p.path).r)}</span>}
+                    </span>
+                  )}
                 </button>
                 <button className="remove" onClick={() => removePhoto(i)} aria-label={`Remove ${p.name}`}>×</button>
               </li>
             ))}
           </ul>
         )}
-        {photos.length > 0 && <div className="strip-count">{photos.length} photo{photos.length > 1 ? "s" : ""}</div>}
+        {photos.length > 0 && (
+          <div className="strip-count">
+            <select value={filter} onChange={(e) => setFilter(e.target.value as Filter)} aria-label="Show" title="Show only some photos. Rate with 1–5, P = pick, X = reject, U = unflag.">
+              <option value="all">All photos</option>
+              <option value="picks">Picks</option>
+              <option value="unrejected">Not rejected</option>
+              <option value="rejected">Rejected</option>
+              {[1, 2, 3, 4, 5].map((n) => <option key={n} value={String(n)}>{"★".repeat(n)} and up</option>)}
+              <option value="edited">Edited</option>
+            </select>
+            <span>{filter === "all" ? `${photos.length} photo${photos.length > 1 ? "s" : ""}` : `${visibleIdx.length} of ${photos.length}`}</span>
+          </div>
+        )}
+        {current && (
+          <div className="rate-bar" role="group" aria-label="Rating">
+            {[1, 2, 3, 4, 5].map((n) => (
+              <button key={n} className={markOf(current.path).r >= n ? "on" : ""} onClick={() => setMark(targetsForMark(), { r: markOf(current.path).r === n ? 0 : n })} aria-label={`${n} star${n > 1 ? "s" : ""}`} title={`${n} (key ${n})`}>★</button>
+            ))}
+            <button className={`fl ${markOf(current.path).f === 1 ? "on pick" : ""}`} onClick={() => setMark(targetsForMark(), { f: markOf(current.path).f === 1 ? 0 : 1 })} title="Pick (P)" aria-label="Pick">⚑</button>
+            <button className={`fl ${markOf(current.path).f === -1 ? "on rej" : ""}`} onClick={() => setMark(targetsForMark(), { f: markOf(current.path).f === -1 ? 0 : -1 })} title="Reject (X)" aria-label="Reject">✕</button>
+          </div>
+        )}
       </aside>
 
       {/* -------- stage */}
@@ -927,7 +1080,7 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
                 <Viewer
                   after={showing.after}
                   before={beforeUrl}
-                  overlay={selMask && maskOverlay && overlayUrl ? overlayUrl : clipping ? showing.overlay : null}
+                  overlay={selMask && maskOverlay && overlayUrl ? overlayUrl : focusMask && focusUrl ? focusUrl : clipping ? showing.overlay : null}
                   W={showing.width}
                   H={showing.height}
                   fullW={showing.full_width || showing.width}
@@ -1000,6 +1153,9 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
               </button>
               <button className={`chip toggle ${clipping ? "on" : ""}`} onClick={() => setClipping((c) => !c)} aria-pressed={clipping}>
                 {clipping ? "Hide clipping" : "Show clipping"}
+              </button>
+              <button className={`chip toggle ${focusMask ? "on" : ""}`} onClick={() => setFocusMask((f) => !f)} aria-pressed={focusMask} title="Focus mask (F): shows in green what is in sharp focus">
+                Focus
               </button>
             </div>
           </>
@@ -1112,6 +1268,40 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
               <button onClick={() => update((s) => void (s.crop = { ...s.crop, flip_h: !s.crop.flip_h, x: 1 - s.crop.x - s.crop.w, angle: -s.crop.angle }))}>Flip</button>
               <button className="primary" onClick={() => setCropMode(false)}>Done</button>
             </div>
+          </div>
+        )}
+
+        {/* snapshots */}
+        {current && (
+          <div className={g("", "snapshots")} data-g="snapshots">
+            <div className="row">
+              <h2><Tip k="s_snap">Snapshots</Tip></h2>
+              <button className="link" onClick={() => {
+                const list = snapshots[current.path] ?? [];
+                const name = `Snapshot ${list.length + 1}`;
+                setSnapshots((m) => ({ ...m, [current.path]: [...list, { name, at: Date.now(), settings: clone(settings) }] }));
+                setToast({ text: `Saved “${name}”. Click it any time to go back to this version.` });
+              }}>+ Save version</button>
+            </div>
+            {(snapshots[current.path] ?? []).length === 0 ? (
+              <p className="hint">Save versions of this edit (say colour and black &amp; white) and switch between them.</p>
+            ) : (
+              <ul className="snaps">
+                {(snapshots[current.path] ?? []).map((sn, i) => (
+                  <li key={sn.at}>
+                    <button className="snap-name" onClick={() => update((s) => void Object.assign(s, normalize(clone(sn.settings))))} title="Go back to this version (⌘Z undoes)">
+                      {sn.name}
+                    </button>
+                    <span className="snap-time">{new Date(sn.at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
+                    <button className="snap-x" aria-label={`Rename ${sn.name}`} title="Rename" onClick={() => {
+                      const n = window.prompt("Name this version", sn.name);
+                      if (n) setSnapshots((m) => ({ ...m, [current.path]: (m[current.path] ?? []).map((x, j) => (j === i ? { ...x, name: n } : x)) }));
+                    }}>✎</button>
+                    <button className="snap-x" aria-label={`Delete ${sn.name}`} title="Delete" onClick={() => setSnapshots((m) => ({ ...m, [current.path]: (m[current.path] ?? []).filter((_, j) => j !== i) }))}>×</button>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         )}
 
@@ -1490,6 +1680,64 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
             <input type="checkbox" checked={writeLut} onChange={(e) => setWriteLut(e.target.checked)} />
             Also save a LUT (.cube) with each photo
           </label>
+          <button className="link exp-toggle" onClick={() => setShowExport((v) => !v)} aria-expanded={showExport}>
+            {showExport ? "▾" : "▸"} Size, sharpening, names &amp; watermark
+            <span className="exp-sum">
+              {[exp.long_edge ? `${exp.long_edge}px` : "", exp.sharpen !== "none" ? `sharpen for ${exp.sharpen}` : "", exp.watermark.text.trim() ? "watermark" : "", exp.rename.trim() ? "renamed" : ""].filter(Boolean).join(" · ")}
+            </span>
+          </button>
+          {showExport && (
+            <div className="exp-opts">
+              <label className="field-label">Size</label>
+              <div className="seg small" role="radiogroup" aria-label="Size">
+                {[0, 2048, 3000, 4000].map((n) => (
+                  <button key={n} role="radio" aria-checked={exp.long_edge === n} className={exp.long_edge === n ? "on" : ""} onClick={() => setExp((e) => ({ ...e, long_edge: n }))}>
+                    {n === 0 ? "Full" : n}
+                  </button>
+                ))}
+              </div>
+              <label className="inline-field">Long edge <input type="number" min={0} max={20000} step={100} value={exp.long_edge || ""} placeholder="full size" onChange={(e) => setExp((x) => ({ ...x, long_edge: Math.max(0, +e.target.value || 0) }))} /> px</label>
+              {format === "jpeg" && <Slider label="JPEG quality" tip="e_quality" value={exp.quality} min={40} max={100} def={92} onChange={(v) => setExp((e) => ({ ...e, quality: v }))} />}
+              <label className="field-label">Output sharpening</label>
+              <div className="inline-field">
+                <select value={exp.sharpen} onChange={(e) => setExp((x) => ({ ...x, sharpen: e.target.value as ExportOpts["sharpen"] }))} aria-label="Sharpen for">
+                  <option value="none">None</option>
+                  <option value="screen">Screen</option>
+                  <option value="glossy">Glossy paper</option>
+                  <option value="matte">Matte paper</option>
+                </select>
+                {exp.sharpen !== "none" && (
+                  <select value={exp.sharpen_amount} onChange={(e) => setExp((x) => ({ ...x, sharpen_amount: e.target.value as ExportOpts["sharpen_amount"] }))} aria-label="Amount">
+                    <option value="low">Low</option>
+                    <option value="standard">Standard</option>
+                    <option value="high">High</option>
+                  </select>
+                )}
+              </div>
+              <label className="field-label" htmlFor="exp-name"><Tip k="e_rename">File names</Tip> (Save all)</label>
+              <input id="exp-name" className="text-in" value={exp.rename} placeholder="{name}_graded" onChange={(e) => setExp((x) => ({ ...x, rename: e.target.value }))} />
+              <div className="tokens">
+                {["{name}", "{n3}", "{date}", "{look}"].map((t) => (
+                  <button key={t} className="chip" onClick={() => setExp((x) => ({ ...x, rename: (x.rename || "") + t }))}>{t}</button>
+                ))}
+              </div>
+              <label className="field-label" htmlFor="exp-wm">Watermark</label>
+              <input id="exp-wm" className="text-in" value={exp.watermark.text} placeholder="© Josh Doe Photography" onChange={(e) => setExp((x) => ({ ...x, watermark: { ...x.watermark, text: e.target.value } }))} />
+              {exp.watermark.text.trim() && (
+                <>
+                  <Slider label="Size" tip="e_wm" value={exp.watermark.size} min={1} max={12} step={0.5} def={3} onChange={(v) => setExp((x) => ({ ...x, watermark: { ...x.watermark, size: v } }))} />
+                  <Slider label="Opacity" tip="e_wm" value={exp.watermark.opacity} min={10} max={100} def={70} onChange={(v) => setExp((x) => ({ ...x, watermark: { ...x.watermark, opacity: v } }))} />
+                  <div className="wm-pos" role="radiogroup" aria-label="Position">
+                    {["tl", "tc", "tr", "ml", "mc", "mr", "bl", "bc", "br"].map((p) => (
+                      <button key={p} role="radio" aria-checked={exp.watermark.position === p} className={exp.watermark.position === p ? "on" : ""} onClick={() => setExp((x) => ({ ...x, watermark: { ...x.watermark, position: p } }))} aria-label={p} />
+                    ))}
+                  </div>
+                  <label className="check"><input type="checkbox" checked={exp.watermark.dark} onChange={(e) => setExp((x) => ({ ...x, watermark: { ...x.watermark, dark: e.target.checked } }))} /> Dark text</label>
+                </>
+              )}
+              <button className="link" onClick={() => setExp(freshExport())}>Reset export options</button>
+            </div>
+          )}
 
           {batch && (
             <div className="progress" aria-live="polite">
@@ -1513,7 +1761,9 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
           <p className="save-hint">Sends a full-quality 16-bit TIFF (graded and retouched) to Photoshop, saved in a "JoshGrade for Photoshop" folder next to the original.</p>
           {photos.length > 1 && (
             <>
-              <button className="wide" disabled={batch?.running} onClick={saveAll}>Save all {photos.length} photos…</button>
+              <button className="wide" disabled={batch?.running || !visibleIdx.length} onClick={saveAll}>
+                {filter === "all" ? `Save all ${photos.length} photos…` : `Save the ${visibleIdx.length} shown photo${visibleIdx.length === 1 ? "" : "s"}…`}
+              </button>
               <button className="wide quiet" onClick={() => setSyncDlg({ mode: "sync", scope: multi.size > 1 ? "selected" : "all" })}>
                 {multi.size > 1 ? `Sync these settings to the ${multi.size} selected photos…` : "Sync these settings to all photos…"}
               </button>
