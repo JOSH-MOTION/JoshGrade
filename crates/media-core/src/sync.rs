@@ -113,11 +113,20 @@ pub struct Coarse {
 
 /// Slide `clip` along `reference` and find the best normalised correlation.
 pub fn coarse_match(reference: &[f32], clip: &[f32]) -> Option<Coarse> {
+    coarse_match_ov(reference, clip, None)
+}
+
+/// As `coarse_match`; `min_overlap_s` allows matches where only that much overlaps
+/// (two cameras that ran at the same time for a while). Default: half the clip, at least 5 s.
+pub fn coarse_match_ov(reference: &[f32], clip: &[f32], min_overlap_s: Option<f64>) -> Option<Coarse> {
     let (n, m) = (reference.len(), clip.len());
     if n == 0 || m == 0 {
         return None;
     }
-    let min_ov = m.min(((m as f64 * 0.5) as usize).max(500)).max(50);
+    let min_ov = match min_overlap_s {
+        Some(s) => m.min(n).min((s * FEAT_RATE) as usize).max(50),
+        None => m.min(((m as f64 * 0.5) as usize).max(500)).max(50),
+    };
     let size = (n + m).next_power_of_two();
     let mut planner = FftPlanner::<f32>::new();
     let fwd = planner.plan_fft_forward(size);
@@ -343,6 +352,145 @@ pub struct Progress {
     pub total: usize,
 }
 
+/// Which camera a clip probably came from: same picture size, frame rate, sound format and
+/// file-name prefix (A001, A002… / C0001…). Used to stop one camera being in two places at once.
+fn camera_key(fp: &Fingerprint) -> String {
+    let name = ffmpeg::file_name(&fp.path);
+    let prefix: String = name.chars().take_while(|c| !c.is_ascii_digit()).collect();
+    let dir = fp.path.parent().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
+    format!("{dir}|{prefix}|{}x{}|{:.2}|{}", fp.info.width, fp.info.height, fp.info.fps(), fp.info.sample_rate)
+}
+
+/// Would clip `u` at `start` (on reference `r`) overlap another placed clip from the same camera?
+/// Only used to throw out doubtful matches: a waveform lock that strong is never chance, and
+/// two cameras of the same model can look alike here.
+fn clashes(placed: &[Option<Match>], prints: &[Result<Fingerprint, Error>], u: usize, r: &str, start: f64, dur: f64) -> bool {
+    let Ok(fu) = &prints[u] else { return false };
+    if !fu.info.has_video {
+        return false;
+    }
+    let key = camera_key(fu);
+    placed.iter().enumerate().any(|(i, m)| {
+        let (Some(m), Ok(fp)) = (m, &prints[i]) else { return false };
+        i != u
+            && m.reference.as_deref() == Some(r)
+            && camera_key(fp) == key
+            && start < m.offset + m.clip_info.duration - 1.0
+            && m.offset < start + dur - 1.0
+    })
+}
+
+/// Where one clip best sits in one of `refs` (index, offset, drift, score, confidence, overlap).
+struct Found {
+    ri: usize,
+    offset: f64,
+    drift: f64,
+    score: f32,
+    confidence: &'static str,
+    overlap: f64,
+    /// How tightly the raw waveforms lock together (unrelated sound: ~3–6).
+    sharp: f32,
+}
+
+impl Found {
+    /// Strong enough to line two cameras up: both checks pass clearly, or the waveforms lock
+    /// so tightly it can't be chance (short overlaps give a weaker loudness score).
+    fn camera_ok(&self) -> bool {
+        self.confidence == "high" || (self.score >= 0.22 && self.sharp >= 40.0)
+    }
+}
+
+fn match_against(tools: &Tools, refs: &[&Fingerprint], fp: &Fingerprint, cancel: &AtomicBool, deep: bool, min_overlap_s: Option<f64>, step: &mut dyn FnMut(String)) -> Option<Found> {
+    let mut best: Option<(usize, Coarse)> = None;
+    for (ri, r) in refs.iter().enumerate() {
+        if let Some(c) = coarse_match_ov(&r.feat, &fp.feat, min_overlap_s) {
+            if best.as_ref().map(|b| c.score > b.1.score).unwrap_or(true) {
+                best = Some((ri, c));
+            }
+        }
+    }
+    let (mut ri, c) = best?;
+    let mut coarse_offset = c.lag as f64 / FEAT_RATE;
+    let mut c = c;
+    // Weak loudness match: try the deep search before giving up. (A strong match that also
+    // appears elsewhere — the same song played twice — can't be settled by more searching.)
+    if deep && c.score < 0.22 {
+        step(format!("Searching harder for {}", ffmpeg::file_name(&fp.path)));
+        let mut deep_best: Option<(usize, f64, f32)> = None;
+        for (rj, r) in refs.iter().enumerate() {
+            if let Some((o, sh)) = deep_search(tools, r, fp, cancel) {
+                if deep_best.map(|b| sh > b.2).unwrap_or(true) {
+                    deep_best = Some((rj, o, sh));
+                }
+            }
+        }
+        if let Some((rj, o, sh)) = deep_best {
+            if sh >= 12.0 {
+                ri = rj;
+                coarse_offset = o;
+                // re-score the loudness match at this position for reporting
+                let lag = (o * FEAT_RATE).round() as i64;
+                c = Coarse { lag, score: c.score.max(0.22), second: c.second.min(0.1), overlap_frames: c.overlap_frames };
+            }
+        }
+    }
+    let r = refs[ri];
+    let ratio = c.score / c.second.max(0.02);
+
+    // Fine alignment (+ drift on long clips), only inside the overlapping part.
+    // Always attempted: its sharpness is the second, independent piece of evidence.
+    let dur = fp.info.duration;
+    let ov_from = (-coarse_offset).max(0.0);
+    let ov_to = dur.min(r.info.duration - coarse_offset);
+    let win = 12.0f64.min((ov_to - ov_from).max(0.5));
+    let mut offset = coarse_offset;
+    let mut drift = 0.0;
+    let mut sharp = 0.0f32;
+    let span = ov_to - ov_from;
+    if span > 0.5 && c.score > 0.08 {
+        let t1 = if span > 90.0 {
+            busiest_window(&fp.energy, ov_from, ov_from + span * 0.4, win)
+        } else {
+            busiest_window(&fp.energy, ov_from, ov_to, win)
+        };
+        if let Some((o1, s1)) = refine_at(tools, &r.path, &fp.path, coarse_offset, t1, win) {
+            sharp = s1;
+            if s1 > 8.0 {
+                offset = o1;
+                if span > 90.0 {
+                    let t2 = busiest_window(&fp.energy, ov_from + span * 0.6, ov_to, win);
+                    if let Some((o2, s2)) = refine_at(tools, &r.path, &fp.path, o1, t2, win) {
+                        if s2 > 8.0 && t2 - t1 > 30.0 {
+                            let d = (o2 - o1) / (t2 - t1);
+                            // Real clock drift is tiny (< 300 ppm); anything bigger is a bad read.
+                            if d.abs() < 300e-6 {
+                                drift = d;
+                                offset = o1 - d * t1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Two independent checks: the loudness pattern lines up (score, and stands out from
+    // other positions = ratio) and the raw waveforms lock together (sharpness).
+    // Unrelated audio scores ~0.15 with sharpness ~3–6; real matches 0.3+ and 15+.
+    let confidence = if c.score >= 0.35 && sharp >= 15.0 && ratio >= 1.1 {
+        "high"
+    } else if c.score >= 0.22 && sharp >= 10.0 {
+        "medium"
+    } else if c.score >= 0.15 && sharp >= 12.0 {
+        "low"
+    } else {
+        "none"
+    };
+    if std::env::var_os("JOSHGRADE_DEBUG").is_some() {
+        eprintln!("  [debug] {} vs {} score {:.3} second {:.3} ratio {:.2} sharp {:.1}", ffmpeg::file_name(&fp.path), ffmpeg::file_name(&r.path), c.score, c.second, ratio, sharp);
+    }
+    Some(Found { ri, offset, drift, score: c.score, confidence, overlap: (c.overlap_frames as f64 / FEAT_RATE).min(dur), sharp })
+}
+
 /// Sync every clip against the reference recordings. With no references, the longest clip
 /// becomes the reference (camera-to-camera sync).
 pub fn sync(
@@ -377,6 +525,10 @@ pub fn sync(
         prints.push(fp);
         done += 1;
     }
+    // Without a recorder the cameras are lined up with each other, and two cameras often
+    // overlap only for part of a take.
+    const CAM_OVERLAP_S: f64 = 6.0;
+    let camera_mode = refs.is_empty();
     if refs.is_empty() {
         // camera-to-camera: longest clip with sound is the reference
         let best = prints
@@ -389,141 +541,142 @@ pub fn sync(
         }
     }
 
-    let mut matches = Vec::new();
-    for (ci, fp) in prints.into_iter().enumerate() {
+    // Every clip's placement so far (None = not placed yet).
+    let n = clips.len();
+    let mut placed: Vec<Option<Match>> = vec![None; n];
+    let mk = |fp: &Fingerprint, reference: Option<&Path>, offset: f64, drift: f64, score: f32, confidence: &str, overlap: f64| Match {
+        clip: fp.path.to_string_lossy().into_owned(),
+        reference: reference.map(|r| r.to_string_lossy().into_owned()),
+        offset,
+        drift_ppm: drift * 1e6,
+        score,
+        confidence: confidence.to_string(),
+        overlap,
+        envelope: envelope(&fp.energy),
+        clip_info: fp.info.clone(),
+    };
+
+    // 1. Each clip against the recorder files (or, with no recorder, the longest clip).
+    for ci in 0..n {
         if cancel.load(Ordering::Relaxed) {
             return Err(Error::Cancelled);
         }
         step(progress, format!("Matching {}", ffmpeg::file_name(&clips[ci])), done);
         done += 1;
-        let fp = match fp {
-            Ok(f) => f,
-            Err(_) => {
-                let info = ffmpeg::probe(tools, &clips[ci]).unwrap_or_default();
-                matches.push(Match {
-                    clip: clips[ci].to_string_lossy().into_owned(),
-                    reference: None, offset: 0.0, drift_ppm: 0.0, score: 0.0, confidence: "none".into(),
-                    overlap: 0.0, clip_info: info, envelope: vec![],
-                });
+        let Ok(fp) = &prints[ci] else { continue };
+        // Same file as the reference (camera-to-camera mode): it is the timeline.
+        if refs.iter().any(|r| r.path == fp.path) {
+            placed[ci] = Some(mk(fp, Some(&fp.path), 0.0, 0.0, 1.0, "high", fp.info.duration));
+            continue;
+        }
+        let rr: Vec<&Fingerprint> = refs.iter().collect();
+        let label = |p: &mut dyn FnMut(Progress), s: String| p(Progress { step: s, done, total });
+        if let Some(f) = match_against(tools, &rr, fp, cancel, true, if camera_mode { Some(CAM_OVERLAP_S) } else { None }, &mut |s| label(progress, s)) {
+            // Camera to camera: only clear matches, and never two places at once for one camera
+            // (anything left over gets another chance against the other cameras below).
+            let ok = if camera_mode {
+                f.camera_ok() && (f.sharp >= 60.0 || !clashes(&placed, &prints, ci, &refs[f.ri].path.to_string_lossy(), f.offset, fp.info.duration))
+            } else {
+                f.confidence != "none"
+            };
+            if ok {
+                placed[ci] = Some(mk(fp, Some(&refs[f.ri].path), f.offset, f.drift, f.score, f.confidence, f.overlap));
+            }
+        }
+    }
+
+    // 2. Multi-camera: clips that didn't hear the recorder (or the first camera) are lined up
+    //    through any clip that is already placed — camera B to camera A, A to the recorder.
+    //    Groups of clips that only match each other become their own synced group.
+    let mut tried: Vec<std::collections::HashSet<usize>> = vec![Default::default(); n];
+    let mut gave_up_root: std::collections::HashSet<usize> = Default::default();
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Error::Cancelled);
+        }
+        let mut moved = false;
+        for u in 0..n {
+            if placed[u].is_some() {
                 continue;
             }
-        };
-        // Same file as the reference (camera-to-camera mode): it is the timeline.
-        if let Some(r) = refs.iter().find(|r| r.path == fp.path) {
-            matches.push(Match {
-                clip: fp.path.to_string_lossy().into_owned(),
-                reference: Some(r.path.to_string_lossy().into_owned()),
-                offset: 0.0, drift_ppm: 0.0, score: 1.0, confidence: "high".into(),
-                overlap: fp.info.duration, envelope: envelope(&fp.energy), clip_info: fp.info,
-            });
+            let Ok(fu) = &prints[u] else { continue };
+            let cands: Vec<usize> = (0..n).filter(|&p| p != u && !tried[u].contains(&p) && placed[p].as_ref().is_some_and(|m| m.reference.is_some()) && prints[p].is_ok()).collect();
+            if cands.is_empty() {
+                continue;
+            }
+            for &p in &cands {
+                tried[u].insert(p);
+            }
+            step(progress, format!("Lining up {} with the other cameras", ffmpeg::file_name(&fu.path)), done);
+            let mut cands = cands;
+            while !cands.is_empty() {
+                let cf: Vec<&Fingerprint> = cands.iter().map(|&p| prints[p].as_ref().unwrap()).collect();
+                let Some(f) = match_against(tools, &cf, fu, cancel, false, Some(CAM_OVERLAP_S), &mut |_| {}) else { break };
+                // Camera to camera needs the strong kind of match (both checks pass clearly).
+                if !f.camera_ok() {
+                    // the loudest look-alike wasn't real: try the remaining clips
+                    cands.remove(f.ri);
+                    continue;
+                }
+                let pm = placed[cands[f.ri]].as_ref().unwrap();
+                let dp = pm.drift_ppm * 1e-6;
+                let start = pm.offset + f.offset * (1.0 + dp);
+                let r = pm.reference.clone().unwrap();
+                // A camera can't film two things at once: reject a spot that overlaps another
+                // clip from the same camera, and try the next best.
+                if f.sharp < 60.0 && clashes(&placed, &prints, u, &r, start, fu.info.duration) {
+                    cands.remove(f.ri);
+                    continue;
+                }
+                let conf = if pm.confidence == "high" { "high" } else { "medium" };
+                placed[u] = Some(mk(fu, Some(Path::new(&r)), start, dp + f.drift, f.score, conf, f.overlap));
+                moved = true;
+                break;
+            }
+        }
+        if moved {
             continue;
         }
-        let mut best: Option<(usize, Coarse)> = None;
-        for (ri, r) in refs.iter().enumerate() {
-            if let Some(c) = coarse_match(&r.feat, &fp.feat) {
-                if best.as_ref().map(|b| c.score > b.1.score).unwrap_or(true) {
-                    best = Some((ri, c));
+        // Nothing more joins the existing groups: start a new group from the longest clip left,
+        // but keep it only if at least one other clip lines up with it.
+        let root = (0..n)
+            .filter(|&u| placed[u].is_none() && !gave_up_root.contains(&u) && prints[u].is_ok())
+            .max_by(|&a, &b| prints[a].as_ref().unwrap().info.duration.partial_cmp(&prints[b].as_ref().unwrap().info.duration).unwrap());
+        let Some(root) = root else { break };
+        gave_up_root.insert(root);
+        let fr = prints[root].as_ref().unwrap();
+        let others: Vec<usize> = (0..n).filter(|&u| u != root && placed[u].is_none() && prints[u].is_ok()).collect();
+        let mut joined = false;
+        for &u in &others {
+            let fu = prints[u].as_ref().unwrap();
+            if let Some(f) = match_against(tools, &[fr], fu, cancel, false, Some(CAM_OVERLAP_S), &mut |_| {}) {
+                if f.camera_ok() && (f.sharp >= 60.0 || !clashes(&placed, &prints, u, &fr.path.to_string_lossy(), f.offset, fu.info.duration)) {
+                    placed[u] = Some(mk(fu, Some(&fr.path), f.offset, f.drift, f.score, f.confidence, f.overlap));
+                    joined = true;
                 }
             }
         }
-        let Some((mut ri, c)) = best else {
-            // No match anywhere: keep it in the report so it's shown (and still exported).
-            matches.push(Match {
-                clip: fp.path.to_string_lossy().into_owned(),
-                reference: None, offset: 0.0, drift_ppm: 0.0, score: 0.0, confidence: "none".into(),
-                overlap: 0.0, envelope: envelope(&fp.energy), clip_info: fp.info,
-            });
-            continue;
-        };
-        let mut coarse_offset = c.lag as f64 / FEAT_RATE;
-        let mut c = c;
-        // Weak loudness match: try the deep search before giving up. (A strong match that also
-        // appears elsewhere — the same song played twice — can't be settled by more searching.)
-        if c.score < 0.22 {
-            step(progress, format!("Searching harder for {}", ffmpeg::file_name(&clips[ci])), done);
-            let mut deep_best: Option<(usize, f64, f32)> = None;
-            for (rj, r) in refs.iter().enumerate() {
-                if let Some((o, sh)) = deep_search(tools, r, &fp, cancel) {
-                    if deep_best.map(|b| sh > b.2).unwrap_or(true) {
-                        deep_best = Some((rj, o, sh));
-                    }
-                }
-            }
-            if let Some((rj, o, sh)) = deep_best {
-                if sh >= 12.0 {
-                    ri = rj;
-                    coarse_offset = o;
-                    // re-score the loudness match at this position for reporting
-                    let lag = (o * FEAT_RATE).round() as i64;
-                    c = Coarse { lag, score: c.score.max(0.22), second: c.second.min(0.1), overlap_frames: c.overlap_frames };
-                }
+        if joined {
+            placed[root] = Some(mk(fr, Some(&fr.path), 0.0, 0.0, 1.0, "high", fr.info.duration));
+            refs.push(fr.clone());
+            for t in tried.iter_mut() {
+                t.clear(); // new clips to try against
             }
         }
-        let r = &refs[ri];
-        let ratio = c.score / c.second.max(0.02);
+    }
 
-        // Fine alignment (+ drift on long clips), only inside the overlapping part.
-        // Always attempted: its sharpness is the second, independent piece of evidence.
-        let dur = fp.info.duration;
-        let ov_from = (-coarse_offset).max(0.0);
-        let ov_to = dur.min(r.info.duration - coarse_offset);
-        let win = 12.0f64.min((ov_to - ov_from).max(0.5));
-        let mut offset = coarse_offset;
-        let mut drift = 0.0;
-        let mut sharp = 0.0f32;
-        let span = ov_to - ov_from;
-        if span > 0.5 && c.score > 0.08 {
-            let t1 = if span > 90.0 {
-                busiest_window(&fp.energy, ov_from, ov_from + span * 0.4, win)
-            } else {
-                busiest_window(&fp.energy, ov_from, ov_to, win)
-            };
-            if let Some((o1, s1)) = refine_at(tools, &r.path, &fp.path, coarse_offset, t1, win) {
-                sharp = s1;
-                if s1 > 8.0 {
-                    offset = o1;
-                    if span > 90.0 {
-                        let t2 = busiest_window(&fp.energy, ov_from + span * 0.6, ov_to, win);
-                        if let Some((o2, s2)) = refine_at(tools, &r.path, &fp.path, o1, t2, win) {
-                            if s2 > 8.0 && t2 - t1 > 30.0 {
-                                let d = (o2 - o1) / (t2 - t1);
-                                // Real clock drift is tiny (< 300 ppm); anything bigger is a bad read.
-                                if d.abs() < 300e-6 {
-                                    drift = d;
-                                    offset = o1 - d * t1;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+    // Report every clip, placed or not (unplaced ones are shown and still exported).
+    let mut matches = Vec::new();
+    for ci in 0..n {
+        match (&placed[ci], &prints[ci]) {
+            (Some(m), _) => matches.push(m.clone()),
+            (None, Ok(fp)) => matches.push(mk(fp, None, 0.0, 0.0, 0.0, "none", 0.0)),
+            (None, Err(_)) => matches.push(Match {
+                clip: clips[ci].to_string_lossy().into_owned(),
+                reference: None, offset: 0.0, drift_ppm: 0.0, score: 0.0, confidence: "none".into(),
+                overlap: 0.0, clip_info: ffmpeg::probe(tools, &clips[ci]).unwrap_or_default(), envelope: vec![],
+            }),
         }
-        // Two independent checks: the loudness pattern lines up (score, and stands out from
-        // other positions = ratio) and the raw waveforms lock together (sharpness).
-        // Unrelated audio scores ~0.15 with sharpness ~3–6; real matches 0.3+ and 15+.
-        let confidence = if c.score >= 0.35 && sharp >= 15.0 && ratio >= 1.1 {
-            "high"
-        } else if c.score >= 0.22 && sharp >= 10.0 {
-            "medium"
-        } else if c.score >= 0.15 && sharp >= 12.0 {
-            "low"
-        } else {
-            "none"
-        };
-        if std::env::var_os("JOSHGRADE_DEBUG").is_some() {
-            eprintln!("  [debug] {} score {:.3} second {:.3} ratio {:.2} sharp {:.1}", ffmpeg::file_name(&fp.path), c.score, c.second, ratio, sharp);
-        }
-        matches.push(Match {
-            clip: fp.path.to_string_lossy().into_owned(),
-            reference: if confidence == "none" { None } else { Some(r.path.to_string_lossy().into_owned()) },
-            offset,
-            drift_ppm: drift * 1e6,
-            score: c.score,
-            confidence: confidence.to_string(),
-            overlap: (c.overlap_frames as f64 / FEAT_RATE).min(dur),
-            envelope: envelope(&fp.energy),
-            clip_info: fp.info,
-        });
     }
     progress(Progress { step: "Done".into(), done: total, total });
     let references: Vec<Reference> = refs.iter().map(|r| Reference { path: r.path.to_string_lossy().into_owned(), info: r.info.clone(), envelope: envelope(&r.energy) }).collect();

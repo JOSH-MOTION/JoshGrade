@@ -216,6 +216,11 @@ export default function VideoApp({ modeSwitch, active }: { modeSwitch?: ReactNod
 
   const synced = report?.matches.filter((m) => m.reference && !report.references.some((r) => r.path === m.clip)) ?? [];
   const unmatched = report?.matches.filter((m) => !m.reference) ?? [];
+  // For the list: every camera clip, including a camera that is the timeline's anchor.
+  const isRecorder = (p: string) => report?.references.some((r) => r.path === p && !r.info.has_video) ?? false;
+  const shown = report?.matches.filter((m) => !isRecorder(m.clip)) ?? [];
+  const placedCount = shown.filter((m) => m.reference).length;
+  const hasRecorder = report?.references.some((r) => !r.info.has_video) ?? false;
 
   const saveSynced = async () => {
     if (!synced.length) return;
@@ -468,18 +473,17 @@ export default function VideoApp({ modeSwitch, active }: { modeSwitch?: ReactNod
                     <button className="link" onClick={runSync} disabled={syncing}>Sync again</button>
                   </div>
                   <p className="sync-summary">
-                    <strong>{synced.length}</strong> of {synced.length + unmatched.length} clip{synced.length + unmatched.length === 1 ? "" : "s"} synced
+                    <strong>{placedCount}</strong> of {shown.length} clip{shown.length === 1 ? "" : "s"} synced
                     {unmatched.length > 0 && <span className="warn-text"> · {unmatched.length} couldn't be matched</span>}
                   </p>
                   <ul className="result-list">
-                    {report.matches
-                      .filter((m) => !report.references.some((r) => r.path === m.clip))
-                      .map((m) => (
+                    {shown.map((m) => (
                         <li key={m.clip} className={selectedClip === m.clip ? "on" : ""}>
                           <button onClick={() => setSelectedClip(m.clip)}>
                             <span className="r-name">{baseName(m.clip)}</span>
                             <span className={`conf c-${m.confidence}`} title={CONF_TIP[m.confidence]}>{CONF_TEXT[m.confidence]}</span>
-                            {m.reference && (
+                            {m.reference === m.clip && <span className="r-detail">The other cameras are lined up to this clip</span>}
+                            {m.reference && m.reference !== m.clip && (
                               <span className="r-detail">
                                 Starts at {fmtTime(m.offset)} in {baseName(m.reference)}
                                 {Math.abs(m.drift_ppm) >= 5 && (
@@ -495,14 +499,18 @@ export default function VideoApp({ modeSwitch, active }: { modeSwitch?: ReactNod
 
                 <div className="group export">
                   <h2>Export</h2>
-                  <label className="check">
-                    <input type="checkbox" checked={keepCam} onChange={(e) => setKeepCam(e.target.checked)} />
-                    Keep the camera's own sound as a second track
-                  </label>
-                  <label className="check">
-                    <input type="checkbox" checked={fixDrift} onChange={(e) => setFixDrift(e.target.checked)} />
-                    Correct clock drift on long clips
-                  </label>
+                  {hasRecorder && (
+                    <>
+                      <label className="check">
+                        <input type="checkbox" checked={keepCam} onChange={(e) => setKeepCam(e.target.checked)} />
+                        Keep the camera's own sound as a second track
+                      </label>
+                      <label className="check">
+                        <input type="checkbox" checked={fixDrift} onChange={(e) => setFixDrift(e.target.checked)} />
+                        Correct clock drift on long clips
+                      </label>
+                    </>
+                  )}
                   {render && (
                     <div className="progress" aria-live="polite">
                       <div className="bar"><span style={{ width: `${(render.done / render.total) * 100}%` }} /></div>
@@ -512,10 +520,18 @@ export default function VideoApp({ modeSwitch, active }: { modeSwitch?: ReactNod
                       </div>
                     </div>
                   )}
-                  <button className="primary wide" disabled={!synced.length || render?.running} onClick={saveSynced}>Save synced videos…</button>
-                  <p className="save-hint">New files with the recorder's sound laid in. The picture is copied untouched, so there's no quality loss and it's fast.</p>
-                  <button className="wide" disabled={!synced.length} onClick={saveTimeline}>Export timeline for Premiere / DaVinci…</button>
-                  <p className="save-hint">One XML timeline with every clip and every recorder file already in place. Premiere: File › Import. DaVinci Resolve: File › Import › Timeline.</p>
+                  {hasRecorder ? (
+                    <>
+                      <button className="primary wide" disabled={!synced.length || render?.running} onClick={saveSynced}>Save synced videos…</button>
+                      <p className="save-hint">New files with the recorder's sound laid in. The picture is copied untouched, so there's no quality loss and it's fast.</p>
+                    </>
+                  ) : null}
+                  <button className={`wide ${hasRecorder ? "" : "primary"}`} disabled={!placedCount} onClick={saveTimeline}>Export timeline for Premiere / DaVinci…</button>
+                  <p className="save-hint">
+                    {hasRecorder
+                      ? "One XML timeline with every clip and every recorder file already in place, one track per camera. Premiere: File › Import. DaVinci Resolve: File › Import › Timeline."
+                      : "One XML timeline with both cameras lined up, one track per camera, each keeping its own sound — ready for a multicam edit. Premiere: File › Import. DaVinci Resolve: File › Import › Timeline."}
+                  </p>
                 </div>
               </>
             ) : (
@@ -783,7 +799,21 @@ function SyncTimeline({ report, selected, onSelect }: { report: Report; selected
     });
     return lanes;
   }
-  const clipLanes = lanesOf(items);
+  // One row per camera (camera A on top, camera B below…), same as the exported timeline.
+  const camKey = (m: Match) => {
+    const name = baseName(m.clip);
+    const dir = m.clip.slice(0, m.clip.length - name.length);
+    const prefix = name.match(/^\D*/)?.[0] ?? "";
+    const i = m.clip_info;
+    return `${dir}|${prefix}|${i.width}x${i.height}|${i.fps_den ? (i.fps_num / i.fps_den).toFixed(2) : 0}|${i.sample_rate}|${i.has_video}`;
+  };
+  const cams: string[] = [];
+  [...items].sort((a, b) => a.start - b.start).forEach((it) => {
+    const k = camKey(it.m);
+    if (!cams.includes(k)) cams.push(k);
+  });
+  const clipLanes = cams.flatMap((k) => lanesOf(items.filter((it) => camKey(it.m) === k)));
+  const noRecorder = recs.length === 0;
   const recLanes = lanesOf(recs);
   const tick = [5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600].find((s) => span / s <= 10) ?? 3600;
   const ticks: number[] = [];
@@ -843,8 +873,10 @@ function SyncTimeline({ report, selected, onSelect }: { report: Report; selected
         </section>
       )}
       <p className="tl-help">
-        Each clip sits where its sound matches the recording — this is the same single timeline you get in Premiere / DaVinci.
-        Green = recorder{several ? " files, placed by the time each one started recording (files without a time follow on in order)" : ""}; blue = camera clips. A yellow edge means "check it".
+        {noRecorder
+          ? "No recorder: the cameras are lined up with each other by their sound, one row per camera — the same timeline you get in Premiere / DaVinci. Clips that only overlap another camera's clip are lined up through that clip. Takes that share no sound with the rest become their own group, after the first. "
+          : "Each clip sits where its sound matches the recording, one row per camera — this is the same single timeline you get in Premiere / DaVinci. Clips that never overlap the recorder are lined up through another camera. "}
+        {!noRecorder && <>Green = recorder{several ? " files, placed by the time each one started recording (files without a time follow on in order)" : ""}; </>}blue = camera clips. A yellow edge means "check it".
       </p>
     </div>
   );

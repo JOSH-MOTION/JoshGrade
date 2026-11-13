@@ -265,7 +265,36 @@ pub fn timeline_xml(matches: &[Match], references: &[crate::sync::Reference]) ->
         (track, ends.len())
     }
     let spans: Vec<(i64, i64)> = items.iter().map(|(m, t)| (fr(*t), fr(*t) + (m.clip_info.duration * fps).round() as i64)).collect();
-    let (track, n_tracks) = assign(&spans);
+    // One camera per track (camera A on V1, camera B on V2…), like a multicam edit. A camera
+    // is told apart by folder, file-name prefix, picture size, frame rate and sound format.
+    let cam_key = |m: &Match| {
+        let p = Path::new(&m.clip);
+        let name = ffmpeg::file_name(p);
+        let prefix: String = name.chars().take_while(|c| !c.is_ascii_digit()).collect();
+        let dir = p.parent().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
+        let i = &m.clip_info;
+        format!("{dir}|{prefix}|{}x{}|{:.2}|{}|{}", i.width, i.height, i.fps(), i.sample_rate, i.has_video)
+    };
+    let mut cams: Vec<String> = Vec::new();
+    let mut by_start: Vec<usize> = (0..items.len()).collect();
+    by_start.sort_by_key(|&k| spans[k].0);
+    for &k in &by_start {
+        let key = cam_key(items[k].0);
+        if !cams.contains(&key) {
+            cams.push(key);
+        }
+    }
+    let mut track = vec![0usize; items.len()];
+    let mut n_tracks = 0;
+    for key in &cams {
+        let ks: Vec<usize> = (0..items.len()).filter(|&k| &cam_key(items[k].0) == key).collect();
+        let sub: Vec<(i64, i64)> = ks.iter().map(|&k| spans[k]).collect();
+        let (t, n) = assign(&sub); // a camera's own clips never overlap, but be safe
+        for (j, &k) in ks.iter().enumerate() {
+            track[k] = n_tracks + t[j];
+        }
+        n_tracks += n;
+    }
     let rec_spans: Vec<(i64, i64)> = recs.iter().map(|&r| (fr(ref_pos[r]), fr(ref_pos[r]) + (references[r].info.duration * fps).round() as i64)).collect();
     let (rec_track, n_rec_tracks) = assign(&rec_spans);
     let seq_end = spans.iter().chain(rec_spans.iter()).map(|s| s.1).max().unwrap_or(0);
