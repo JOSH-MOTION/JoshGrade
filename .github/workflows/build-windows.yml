@@ -20,6 +20,10 @@ jobs:
     env:
       # whisper-rs (captions) needs clang to generate its bindings
       LIBCLANG_PATH: C:\Program Files\LLVM\bin
+      # static C runtime: runs on PCs without the Visual C++ Redistributable
+      RUSTFLAGS: -C target-feature=+crt-static
+      CMAKE_MSVC_RUNTIME_LIBRARY: MultiThreaded
+      CMAKE_POLICY_DEFAULT_CMP0091: NEW
     steps:
       - uses: actions/checkout@v4
 

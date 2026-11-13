@@ -4,3 +4,4 @@ target
 src-tauri/gen
 .DS_Store
 src-tauri/binaries/
+.xbin
