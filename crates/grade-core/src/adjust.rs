@@ -101,11 +101,13 @@ pub struct Settings {
     pub detail: crate::detail::Detail,
     /// Local adjustments.
     pub masks: Vec<crate::masks::Mask>,
+    /// Lens corrections and Transform.
+    pub lens: crate::lens::Lens,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { auto: true, look: "natural".into(), strength: 1.0, adjust: Adjust::default(), retouch: Default::default(), crop: Default::default(), curves: Default::default(), detail: Default::default(), masks: vec![] }
+        Settings { auto: true, look: "natural".into(), strength: 1.0, adjust: Adjust::default(), retouch: Default::default(), crop: Default::default(), curves: Default::default(), detail: Default::default(), masks: vec![], lens: Default::default() }
     }
 }
 

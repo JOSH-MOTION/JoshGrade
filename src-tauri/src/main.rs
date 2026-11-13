@@ -29,22 +29,42 @@ struct Entry {
     /// The last retouched copy, so moving a grade slider doesn't redo the retouch.
     retouched: Mutex<Option<(RetouchSettings, Arc<Photo>)>>,
     /// Where the person and the sky are (found the first time an AI mask is used).
-    seg: Mutex<Option<Arc<masks::Segments>>>,
+    seg: Mutex<Option<(grade_core::lens::Lens, Arc<masks::Segments>)>>,
+    /// Lateral chromatic aberration found in this photo (red, blue scale), when asked for.
+    ca: Mutex<Option<(f32, f32)>>,
 }
 
 impl Entry {
     /// Person / sky maps, when a mask needs them.
-    fn segments(&self, m: &[masks::Mask]) -> Result<Option<Arc<masks::Segments>>, String> {
+    fn segments(&self, m: &[masks::Mask], lens: &grade_core::lens::Lens) -> Result<Option<Arc<masks::Segments>>, String> {
         if !masks::needs_ai(m) {
             return Ok(None);
         }
+        // geometry changes (lens / transform) move the person and sky, so look again
+        let key = if lens.geometric() { *lens } else { grade_core::lens::Lens::default() };
         let mut g = self.seg.lock().unwrap();
-        if let Some(s) = &*g {
-            return Ok(Some(s.clone()));
+        if let Some((k, s)) = &*g {
+            if *k == key {
+                return Ok(Some(s.clone()));
+            }
         }
-        let s = Arc::new(masks::segment(&self.photo).map_err(|e| if e == "model-missing" { "mask-model-missing".to_string() } else { e })?);
-        *g = Some(s.clone());
+        let src = if lens.geometric() { grade_core::lens::apply(&self.photo, &key) } else { self.photo.clone() };
+        let s = Arc::new(masks::segment(&src).map_err(|e| if e == "model-missing" { "mask-model-missing".to_string() } else { e })?);
+        *g = Some((key, s.clone()));
         Ok(Some(s))
+    }
+
+    fn ca(&self) -> (f32, f32) {
+        *self.ca.lock().unwrap().get_or_insert_with(|| grade_core::lens::estimate_ca(&self.photo))
+    }
+
+    /// Lens corrections on a whole photo-sized buffer.
+    fn lensed(&self, p: &Photo, l: &grade_core::lens::Lens) -> Photo {
+        if !l.active() {
+            return p.clone();
+        }
+        let ca = if l.remove_ca { self.ca() } else { (0.0, 0.0) };
+        grade_core::lens::apply_window(p, l, ca, &grade_core::lens::Window::whole(p), p.width as usize, p.height as usize)
     }
 
     /// The photo to grade: the original, or the retouched copy when retouch is on.
@@ -171,7 +191,7 @@ fn cached(state: &AppState, path: &str) -> Result<Arc<Entry>, String> {
     let before_url = jpeg_url(&photo, 88)?;
     let before_scopes = scopes::compute(&photo);
     let before_measure = report::measure(&photo);
-    let entry = Arc::new(Entry { photo, analysis, before_url, before_scopes, before_measure, faces: Mutex::new(None), retouched: Mutex::new(None), seg: Mutex::new(None), full_dims });
+    let entry = Arc::new(Entry { photo, analysis, before_url, before_scopes, before_measure, faces: Mutex::new(None), retouched: Mutex::new(None), seg: Mutex::new(None), ca: Mutex::new(None), full_dims });
     let mut c = state.cache.lock().unwrap();
     if c.len() > 16 {
         c.clear(); // keep memory bounded
@@ -236,8 +256,10 @@ async fn preview(state: St<'_>, path: String, settings: Settings, with_before: b
         let (base, retouch) = e.base(&settings.retouch)?;
         let cr = settings.crop;
         let turned = cr.rot90 % 4 != 0 || cr.flip_h;
-        let after = grade.apply(base.as_deref().unwrap_or(&e.photo));
-        let seg = if masks::active(&settings.masks) { e.segments(&settings.masks)? } else { None };
+        let lensed = e.lensed(base.as_deref().unwrap_or(&e.photo), &settings.lens);
+        let after = grade.apply(&lensed);
+        drop(lensed);
+        let seg = if masks::active(&settings.masks) { e.segments(&settings.masks, &settings.lens)? } else { None };
         let after = masks::apply(&after, &settings.masks, seg.as_deref(), &masks::View::whole(&after));
         // detail at preview scale (sharpening only shows at 100% zoom, like Lightroom)
         let k = e.photo.width.max(e.photo.height) as f32 / e.full_dims.0.max(e.full_dims.1).max(1) as f32;
@@ -311,14 +333,22 @@ async fn preview_region(state: St<'_>, path: String, settings: Settings, region:
         let (px0, py0) = ((x0 * bw) as u32, (y0 * bh) as u32);
         let pw = (((x1 - x0) * bw).ceil() as u32).clamp(1, base.width - px0.min(base.width - 1));
         let ph = (((y1 - y0) * bh).ceil() as u32).clamp(1, base.height - py0.min(base.height - 1));
-        let mut piece = grade_core::Photo { width: pw, height: ph, data: Vec::with_capacity((pw * ph) as usize), from_raw: base.from_raw };
-        for y in py0..py0 + ph {
-            let row = (y * base.width + px0) as usize;
-            piece.data.extend_from_slice(&base.data[row..row + pw as usize]);
-        }
+        let lens = if before { grade_core::lens::Lens::default() } else { settings.lens };
+        let mut piece = if lens.active() {
+            let ca = if lens.remove_ca { e.ca() } else { (0.0, 0.0) };
+            let win = grade_core::lens::Window { full_w: bw, full_h: bh, x0: px0 as f32, y0: py0 as f32, step: 1.0 };
+            grade_core::lens::apply_window(&base, &lens, ca, &win, pw as usize, ph as usize)
+        } else {
+            let mut piece = grade_core::Photo { width: pw, height: ph, data: Vec::with_capacity((pw * ph) as usize), from_raw: base.from_raw };
+            for y in py0..py0 + ph {
+                let row = (y * base.width + px0) as usize;
+                piece.data.extend_from_slice(&base.data[row..row + pw as usize]);
+            }
+            piece
+        };
         if !before {
             let grade = grade_core::grade_with(&e.analysis, &settings).map_err(|e| e.to_string())?;
-            let seg = if masks::active(&settings.masks) { e.segments(&settings.masks)? } else { None };
+            let seg = if masks::active(&settings.masks) { e.segments(&settings.masks, &settings.lens)? } else { None };
             let view = masks::View { full_w: bw, full_h: bh, x0: px0 as f32, y0: py0 as f32, step: 1.0 };
             let graded = masks::apply(&grade.apply(&piece), &settings.masks, seg.as_deref(), &view);
             piece = grade_core::detail::apply(&graded, &settings.detail, 1.0);
@@ -489,6 +519,19 @@ async fn save_batch(app: tauri::AppHandle, state: St<'_>, req: BatchRequest) -> 
     .await
 }
 
+/// Auto straighten: the angle that levels the strongest lines (None = no clear lines).
+#[tauri::command]
+async fn auto_level(state: St<'_>, path: String, settings: Settings) -> Result<Option<f32>, String> {
+    let st = Arc::clone(&state);
+    blocking(move || {
+        let e = cached(&st, &path)?;
+        let shown = e.lensed(&e.photo, &settings.lens);
+        let shown = geometry::turn(&shown, settings.crop.rot90, settings.crop.flip_h);
+        Ok(grade_core::lens::auto_level(&shown))
+    })
+    .await
+}
+
 /// White balance eyedropper: click something that should be grey. `x`, `y` are fractions of
 /// the photo as shown (after quarter turns / flip).
 #[tauri::command]
@@ -516,9 +559,10 @@ async fn mask_overlay(state: St<'_>, path: String, settings: Settings, index: us
     blocking(move || {
         let e = cached(&st, &path)?;
         let m = settings.masks.get(index).ok_or("no such mask")?;
-        let seg = e.segments(std::slice::from_ref(m))?;
-        let v = masks::values(&e.photo, m, seg.as_deref(), &masks::View::whole(&e.photo));
-        let p = Photo { width: e.photo.width, height: e.photo.height, data: v.iter().map(|&a| [a, a, a]).collect(), from_raw: false };
+        let seg = e.segments(std::slice::from_ref(m), &settings.lens)?;
+        let shown = e.lensed(&e.photo, &settings.lens);
+        let v = masks::values(&shown, m, seg.as_deref(), &masks::View::whole(&shown));
+        let p = Photo { width: shown.width, height: shown.height, data: v.iter().map(|&a| [a, a, a]).collect(), from_raw: false };
         let p = geometry::turn(&p, settings.crop.rot90, settings.crop.flip_h);
         let img = image::RgbaImage::from_fn(p.width, p.height, |x, y| {
             let a = p.data[(y * p.width + x) as usize][0];
@@ -638,6 +682,7 @@ fn main() {
             mask_overlay,
             prefetch,
             wb_pick,
+            auto_level,
             jobs::jobs_list,
             jobs::job_cancel,
             jobs::jobs_clear,

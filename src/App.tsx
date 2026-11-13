@@ -37,13 +37,14 @@ const PARTS = [
   { id: "retouch", label: "Retouch", hint: "Blemish removal and skin settings. Each photo finds its own spots." },
   { id: "aimasks", label: "Masks: Person, Sky, Background", hint: "Found again on each photo" },
   { id: "handmasks", label: "Masks: Brush, Linear, Radial", hint: "Same place on every photo" },
+  { id: "lens", label: "Lens & transform", hint: "Distortion, fringes, lens vignetting, perspective" },
   { id: "crop", label: "Crop & straighten", hint: "" },
 ] as const;
 type Part = (typeof PARTS)[number]["id"];
-const DEFAULT_PARTS: Part[] = ["grade", "light", "curve", "detail", "effects", "retouch", "aimasks"];
+const DEFAULT_PARTS: Part[] = ["grade", "light", "curve", "detail", "effects", "retouch", "aimasks", "lens"];
 const EFFECT_KEYS = ["vignette", "vignette_midpoint", "vignette_feather", "grain", "grain_size"] as const;
 /** `target` with the chosen parts taken from `src`. */
-function mergeParts<S extends { auto: boolean; look: string; strength: number; adjust: unknown; curves: unknown; detail: Detail; retouch: unknown; masks: Mask[]; crop: unknown }>(
+function mergeParts<S extends { auto: boolean; look: string; strength: number; adjust: unknown; curves: unknown; detail: Detail; retouch: unknown; masks: Mask[]; crop: unknown; lens: unknown }>(
   target: S,
   src: S,
   parts: Part[],
@@ -67,6 +68,7 @@ function mergeParts<S extends { auto: boolean; look: string; strength: number; a
     const pick = (m: Mask) => (isAi(m.kind) ? has("aimasks") : has("handmasks"));
     t.masks = [...c.masks.filter(pick), ...t.masks.filter((m) => !pick(m))];
   }
+  if (has("lens")) t.lens = c.lens;
   if (has("crop")) t.crop = c.crop;
   return t;
 }
@@ -76,7 +78,15 @@ const freshDetail = (): Detail => ({
   vignette: 0, vignette_midpoint: 50, vignette_feather: 50, grain: 0, grain_size: 25,
 });
 type Retouch = { enabled: boolean; blemishes: number; smooth: number; even: number; shine: number; keep_moles: boolean; keep_freckles: boolean };
-type Settings = { auto: boolean; look: string; strength: number; adjust: Adjust; retouch: Retouch; crop: Crop; curves: Curves; detail: Detail; masks: Mask[] };
+type Settings = { auto: boolean; look: string; strength: number; adjust: Adjust; retouch: Retouch; crop: Crop; curves: Curves; detail: Detail; masks: Mask[]; lens: Lens };
+type Lens = {
+  distortion: number; vignetting: number; vignetting_mid: number; remove_ca: boolean; defringe_purple: number; defringe_green: number;
+  vertical: number; horizontal: number; rotate: number; aspect: number; scale: number; x_offset: number; y_offset: number; constrain: boolean;
+};
+const freshLens = (): Lens => ({
+  distortion: 0, vignetting: 0, vignetting_mid: 50, remove_ca: false, defringe_purple: 0, defringe_green: 0,
+  vertical: 0, horizontal: 0, rotate: 0, aspect: 0, scale: 100, x_offset: 0, y_offset: 0, constrain: true,
+});
 type ReportLine = { key: string; label: string; before: string; after: string; verdict: string; status: "good" | "warn" | "info" };
 type Photo = { path: string; name: string; thumb?: string; saved?: string; error?: string };
 type Preview = {
@@ -98,7 +108,7 @@ const freshAdjust = (): Adjust => ({
   grading: freshGrading(), param: [0, 0, 0, 0], calibration: freshCalibration(),
 });
 const freshRetouch = (): Retouch => ({ enabled: false, blemishes: 1, smooth: 0.45, even: 0.5, shine: 0.35, keep_moles: true, keep_freckles: true });
-const freshSettings = (): Settings => ({ auto: true, look: "natural", strength: 1, adjust: freshAdjust(), retouch: freshRetouch(), crop: freshCrop(), curves: freshCurves(), detail: freshDetail(), masks: [] });
+const freshSettings = (): Settings => ({ auto: true, look: "natural", strength: 1, adjust: freshAdjust(), retouch: freshRetouch(), crop: freshCrop(), curves: freshCurves(), detail: freshDetail(), masks: [], lens: freshLens() });
 const clone = <T,>(s: T): T => JSON.parse(JSON.stringify(s));
 
 const EXTENSIONS = [
@@ -197,6 +207,7 @@ function normalize(stored: Settings): Settings {
     curves: stored.curves ?? freshCurves(),
     detail: { ...freshDetail(), ...stored.detail },
     masks: (stored.masks ?? []).map((m) => ({ ...m, adjust: { ...freshMaskAdjust(), ...m.adjust } })),
+    lens: { ...freshLens(), ...stored.lens },
   };
 }
 
@@ -409,6 +420,13 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
   };
   const applyPreset = (pr: Preset) => update((s) => void Object.assign(s, { ...clone(pr.settings), crop: s.crop, masks: [...(pr.settings.masks ?? []).map(clone), ...s.masks.filter((m) => !isAi(m.kind))] }));
   const setAdj = (key: keyof Omit<Adjust, "hue" | "sat" | "lum" | "grading" | "param" | "calibration">) => (v: number) => update((s) => void (s.adjust[key] = v));
+  const setLens = (key: keyof Omit<Lens, "remove_ca" | "constrain">) => (v: number) => update((s) => void (s.lens[key] = v));
+  const autoStraighten = async () => {
+    if (!current || !showing) return;
+    const a = await invoke<number | null>("auto_level", { path: current.path, settings: eff(settings) }).catch(() => null);
+    if (a === null) setToast({ text: "No clear straight lines to level by in this photo." });
+    else update((s) => void (s.crop = fitCrop({ ...s.crop, angle: Math.round(a * 10) / 10 }, showing.width, showing.height)));
+  };
   const setCal = (key: keyof Calibration) => (v: number) => update((s) => void (s.adjust.calibration[key] = v));
   const setParam = (i: number) => (v: number) => update((s) => void (s.adjust.param[i] = v));
   const [gradeView, setGradeView] = useState<"3way" | "global">("3way");
@@ -1045,6 +1063,7 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
             </div>
             <Slider label="Straighten" tip="c_angle" value={Math.round(settings.crop.angle * 10) / 10} min={-45} max={45} step={0.1} suffix="°"
               onChange={(v) => update((s) => void (s.crop = fitCrop({ ...s.crop, angle: v }, showing.width, showing.height)))} />
+            <button className="chip" onClick={autoStraighten} title="Level the horizon / straighten by the photo's own lines">Auto straighten</button>
             <div className="btn-row">
               <button onClick={() => update((s) => void (s.crop = { ...freshCrop(), rot90: (s.crop.rot90 + 3) % 4, flip_h: s.crop.flip_h }))} title="Rotate left">⟲ Rotate left</button>
               <button onClick={() => update((s) => void (s.crop = { ...freshCrop(), rot90: (s.crop.rot90 + 1) % 4, flip_h: s.crop.flip_h }))} title="Rotate right">Rotate right ⟳</button>
@@ -1352,6 +1371,27 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
           <h2 className="sub">Grain</h2>
           <Slider label="Amount" tip="d_grain" value={settings.detail.grain} min={0} max={100} def={0} onChange={setDet("grain")} />
           <Slider label="Size" tip="d_gsize" value={settings.detail.grain_size} min={0} max={100} def={25} onChange={setDet("grain_size")} />
+        </div>
+
+        <div className={g("", "lens")} data-g="lens">
+          <h2><Tip k="l_lens">Lens &amp; transform</Tip></h2>
+          <label className="check"><input type="checkbox" checked={settings.lens.remove_ca} onChange={(e) => update((s) => void (s.lens.remove_ca = e.target.checked))} /> Remove chromatic aberration</label>
+          <Slider label="Distortion" tip="l_distortion" value={settings.lens.distortion} onChange={setLens("distortion")} />
+          <Slider label="Lens vignetting" tip="l_vignetting" value={settings.lens.vignetting} onChange={setLens("vignetting")} />
+          {settings.lens.vignetting !== 0 && <Slider label="Midpoint" tip="l_vignetting" value={settings.lens.vignetting_mid} min={0} max={100} def={50} onChange={setLens("vignetting_mid")} />}
+          <h2 className="sub">Defringe</h2>
+          <Slider label="Purple" tip="l_defringe" value={settings.lens.defringe_purple} min={0} max={100} def={0} onChange={setLens("defringe_purple")} />
+          <Slider label="Green" tip="l_defringe" value={settings.lens.defringe_green} min={0} max={100} def={0} onChange={setLens("defringe_green")} />
+          <h2 className="sub"><Tip k="l_transform">Transform</Tip></h2>
+          <Slider label="Vertical" tip="l_vertical" value={settings.lens.vertical} onChange={setLens("vertical")} />
+          <Slider label="Horizontal" tip="l_vertical" value={settings.lens.horizontal} onChange={setLens("horizontal")} />
+          <Slider label="Rotate" tip="l_rotate" value={settings.lens.rotate} min={-10} max={10} step={0.1} suffix="°" onChange={setLens("rotate")} />
+          <Slider label="Aspect" tip="l_aspect" value={settings.lens.aspect} onChange={setLens("aspect")} />
+          <Slider label="Scale" tip="l_scale" value={settings.lens.scale} min={50} max={150} def={100} onChange={setLens("scale")} />
+          <Slider label="Offset X" tip="l_scale" value={settings.lens.x_offset} onChange={setLens("x_offset")} />
+          <Slider label="Offset Y" tip="l_scale" value={settings.lens.y_offset} onChange={setLens("y_offset")} />
+          <label className="check"><input type="checkbox" checked={settings.lens.constrain} onChange={(e) => update((s) => void (s.lens.constrain = e.target.checked))} /> Constrain crop (no empty edges)</label>
+          <button className="link" onClick={() => update((s) => void (s.lens = freshLens()))}>Reset lens &amp; transform</button>
         </div>
 
         <div className={g("", "calibration")} data-g="calibration">

@@ -17,6 +17,7 @@ pub mod geometry;
 pub mod grade;
 pub mod learn;
 pub mod looks;
+pub mod lens;
 pub mod lut;
 pub mod masks;
 pub mod report;
@@ -146,7 +147,16 @@ pub fn save_graded(input: &Path, output: &Path, settings: &Settings, format: Out
             full = retouch::apply(&full, &faces, &settings.retouch);
         }
     }
-    let seg = if masks::needs_ai(&settings.masks) && masks::active(&settings.masks) { Some(masks::segment(&small).map_err(Error::Retouch)?) } else { None };
+    // lens corrections / transform (before grading, like a RAW developer)
+    if settings.lens.active() {
+        full = lens::apply(&full, &settings.lens);
+    }
+    let seg = if masks::needs_ai(&settings.masks) && masks::active(&settings.masks) {
+        let s = if settings.lens.geometric() { lens::apply(&small, &settings.lens) } else { small.clone() };
+        Some(masks::segment(&s).map_err(Error::Retouch)?)
+    } else {
+        None
+    };
     drop(small);
     let graded = grade.apply_exact(&full);
     let graded = masks::apply(&graded, &settings.masks, seg.as_ref(), &masks::View::whole(&graded));
