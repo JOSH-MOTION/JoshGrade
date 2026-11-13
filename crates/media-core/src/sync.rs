@@ -426,7 +426,15 @@ pub fn sync(
                 }
             }
         }
-        let Some((mut ri, c)) = best else { continue };
+        let Some((mut ri, c)) = best else {
+            // No match anywhere: keep it in the report so it's shown (and still exported).
+            matches.push(Match {
+                clip: fp.path.to_string_lossy().into_owned(),
+                reference: None, offset: 0.0, drift_ppm: 0.0, score: 0.0, confidence: "none".into(),
+                overlap: 0.0, envelope: envelope(&fp.energy), clip_info: fp.info,
+            });
+            continue;
+        };
         let mut coarse_offset = c.lag as f64 / FEAT_RATE;
         let mut c = c;
         // Weak loudness match: try the deep search before giving up. (A strong match that also

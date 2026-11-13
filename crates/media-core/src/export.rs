@@ -113,6 +113,14 @@ fn file_xml(id: &str, info: &MediaInfo, tb: u32, ntsc: bool, fps: f64, defined: 
         return format!("<file id=\"{id}\"/>");
     }
     let name = esc(&ffmpeg::file_name(Path::new(&info.path)));
+    // A camera file is described at its own frame rate (a 29.97 clip in a 25 timeline stays 29.97);
+    // sound-only files use the timeline's rate.
+    let (tb, ntsc, fps) = if info.has_video && info.fps() > 0.0 {
+        let (t, n) = timebase(info);
+        (t, n, info.fps())
+    } else {
+        (tb, ntsc, fps)
+    };
     let frames = (info.duration * fps).round() as i64;
     let mut s = format!(
         "<file id=\"{id}\"><name>{name}</name><pathurl>{}</pathurl>{}<duration>{frames}</duration>",
@@ -199,16 +207,35 @@ pub fn timeline_xml(matches: &[Match], references: &[crate::sync::Reference]) ->
 
     // Clips that go on the picture/camera-sound tracks, with their timeline start in seconds.
     let mut items: Vec<(&Match, f64)> = Vec::new();
+    let mut unsynced: Vec<&Match> = Vec::new();
     for m in matches {
-        let Some(ri) = m.reference.as_deref().and_then(ref_of) else { continue };
+        let Some(ri) = m.reference.as_deref().and_then(ref_of) else {
+            if m.clip_info.duration > 0.0 && (m.clip_info.has_video || m.clip_info.has_audio) {
+                unsynced.push(m);
+            }
+            continue;
+        };
         // In camera-to-camera mode the reference is itself a camera clip: show it as one.
         if m.clip == references[ri].path && !m.clip_info.has_video {
             continue;
         }
-        items.push((m, ref_pos[ri] + m.offset));
+        // With clock drift the NLE can't stretch the clip, so line it up at its middle
+        // (halves the worst error at the ends; the rendered synced files fix drift fully).
+        items.push((m, ref_pos[ri] + m.offset + m.drift_ppm * 1e-6 * m.clip_info.duration / 2.0));
     }
     // Recorder files (audio-only references) go on their own tracks.
     let recs: Vec<usize> = (0..references.len()).filter(|&i| !references[i].info.has_video).collect();
+    // Clips that couldn't be synced still go in, one after another after the end (so nothing is
+    // lost); the editor lines them up by hand.
+    if !unsynced.is_empty() {
+        let mut t = items.iter().map(|(m, t)| t + m.clip_info.duration)
+            .chain(recs.iter().map(|&r| ref_pos[r] + references[r].info.duration))
+            .fold(0.0f64, f64::max) + 10.0;
+        for m in unsynced {
+            items.push((m, t));
+            t += m.clip_info.duration + 2.0;
+        }
+    }
     if items.is_empty() && recs.is_empty() {
         x.push_str("</children></project>\n</xmeml>\n");
         return x;
@@ -247,7 +274,7 @@ pub fn timeline_xml(matches: &[Match], references: &[crate::sync::Reference]) ->
         "<format><samplecharacteristics>{}<width>{}</width><height>{}</height><pixelaspectratio>square</pixelaspectratio></samplecharacteristics></format>",
         rate_xml(tb, ntsc), first.width.max(16), first.height.max(16)
     );
-    let _ = write!(x, "<sequence id=\"sequence-1\"><name>JoshGrade Sync</name><duration>{seq_end}</duration>{}<media>\n<video>{fmt}\n", rate_xml(tb, ntsc));
+    let _ = write!(x, "<sequence id=\"sequence-1\"><name>JoshGrade Sync</name><duration>{seq_end}</duration>{}<timecode>{}<string>00:00:00:00</string><frame>0</frame><displayformat>NDF</displayformat></timecode><media>\n<video>{fmt}\n", rate_xml(tb, ntsc), rate_xml(tb, ntsc));
 
     let name = |p: &str| esc(&ffmpeg::file_name(Path::new(p)));
     let fid = |p: &str| format!("file-{}", sanitize_id(p));
@@ -286,9 +313,12 @@ pub fn timeline_xml(matches: &[Match], references: &[crate::sync::Reference]) ->
     }
     x.push_str("</video>\n<audio>\n");
     // camera sound, one track per picture track
+    // Premiere reads a track as mono unless told: say which tracks carry stereo files.
+    let track_tag = |stereo: bool| format!("<track premiereTrackType=\"{}\">\n", if stereo { "Stereo" } else { "Mono" });
     for t in 0..n_tracks {
-        x.push_str("<track>\n");
-        for k in in_time_order(t, false) {
+        let on = in_time_order(t, false);
+        x.push_str(&track_tag(!on.is_empty() && on.iter().all(|&k| items[k].0.clip_info.audio_channels == 2)));
+        for k in on {
             let m = items[k].0;
             let (s, e) = spans[k];
             let frames = e - s;
@@ -302,8 +332,8 @@ pub fn timeline_xml(matches: &[Match], references: &[crate::sync::Reference]) ->
     }
     // recorder files, below the camera sound
     for t in 0..n_rec_tracks {
-        x.push_str("<track>\n");
         let mut on: Vec<usize> = (0..recs.len()).filter(|&k| rec_track[k] == t).collect();
+        x.push_str(&track_tag(!on.is_empty() && on.iter().all(|&k| references[recs[k]].info.audio_channels == 2)));
         on.sort_by_key(|&k| rec_spans[k].0);
         for k in on {
             let r = &references[recs[k]];
