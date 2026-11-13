@@ -26,6 +26,9 @@ function Root() {
   );
 }
 
+// Windows / Linux draw their own title bar, so there are no Mac window buttons to leave room for
+if (!/Mac/.test(navigator.platform || navigator.userAgent)) document.documentElement.classList.add("not-mac");
+
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <Root />

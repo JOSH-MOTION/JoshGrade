@@ -470,7 +470,7 @@ fn ass_style(style: &BurnStyle, video_h: u32) -> String {
         "lower" => 72,
         _ => 18,
     };
-    let font = if Path::new("/System/Library/Fonts/Supplemental/Arial Bold.ttf").exists() || cfg!(target_os = "macos") { "Arial" } else { "DejaVu Sans" };
+    let font = if Path::new("/System/Library/Fonts/Supplemental/Arial Bold.ttf").exists() || cfg!(any(target_os = "macos", windows)) { "Arial" } else { "DejaVu Sans" };
     let _ = video_h;
     match style.preset.as_str() {
         "box" => format!("FontName={font},FontSize={size},Bold=1,PrimaryColour=&H00FFFFFF,BackColour=&H99000000,OutlineColour=&H99000000,BorderStyle=3,Outline=4,Shadow=0,Alignment={align},MarginV={margin}"),

@@ -1,0 +1,70 @@
+name: Build Windows app
+
+# Builds the JoshGrade installer for Windows (64-bit) and puts it on the Releases page.
+# Runs on every push to main, or by hand: Actions › Build Windows app › Run workflow.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-windows
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      # whisper-rs (captions) needs clang to generate its bindings
+      LIBCLANG_PATH: C:\Program Files\LLVM\bin
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+
+      - name: Get ffmpeg + ffprobe (bundled inside the app, for the video tools)
+        shell: pwsh
+        run: |
+          $zip = "$env:RUNNER_TEMP\ffmpeg.zip"
+          Invoke-WebRequest "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" -OutFile $zip
+          Expand-Archive $zip -DestinationPath "$env:RUNNER_TEMP\ff"
+          $bin = Get-ChildItem "$env:RUNNER_TEMP\ff" -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          New-Item -ItemType Directory -Force src-tauri\binaries | Out-Null
+          Copy-Item $bin.FullName src-tauri\binaries\ffmpeg-x86_64-pc-windows-msvc.exe
+          Copy-Item (Join-Path $bin.DirectoryName ffprobe.exe) src-tauri\binaries\ffprobe-x86_64-pc-windows-msvc.exe
+          & src-tauri\binaries\ffmpeg-x86_64-pc-windows-msvc.exe -version | Select-Object -First 1
+
+      - name: Install JavaScript dependencies
+        run: npm ci
+
+      - name: Build installer and publish release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__-windows${{ github.run_number }}
+          releaseName: JoshGrade v__VERSION__ for Windows (build ${{ github.run_number }})
+          releaseBody: |
+            Download **JoshGrade_*_x64-setup.exe** below and double-click it.
+
+            Windows may say "Windows protected your PC" because the app isn't signed yet. Click **More info**, then **Run anyway**. You only do this once.
+
+            Retouch and the Person / Sky masks download their engines (about 95 MB in total) the first time you use them.
+          releaseDraft: false
+          prerelease: false
+
+      - name: Keep a copy as a build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JoshGrade-windows
+          path: target/release/bundle/nsis/*.exe

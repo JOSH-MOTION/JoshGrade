@@ -409,3 +409,5 @@ button.quiet { background: none; }
 .sync-parts small { display: block; color: var(--muted); font-size: 11.5px; margin-top: 1px; }
 .sync-dlg .seg { margin-bottom: 14px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+.not-mac .titlebar { padding-left: 16px; }
