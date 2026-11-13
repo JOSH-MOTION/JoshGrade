@@ -8,6 +8,7 @@ import { ColorWheel, Histogram, ScopeData, bandColor } from "./Scopes";
 import { Tip } from "./Tip";
 import { CurveEditor, Curves, freshCurves } from "./CurveEditor";
 import { Crop, cropActive, cropToAspect, fitCrop, freshCrop, Viewer } from "./Viewer";
+import { GradeWheel, type Wheel } from "./GradeWheel";
 import { Brush, KINDS, Mask, MaskAdjust, MaskKind, freshMaskAdjust, isAi, newMask } from "./Masks";
 
 type Look = { id: string; name: string; description: string };
@@ -15,7 +16,13 @@ type Adjust = {
   exposure: number; contrast: number; highlights: number; shadows: number;
   temp: number; tint: number; vibrance: number; saturation: number; whites: number; blacks: number;
   hue: number[]; sat: number[]; lum: number[];
+  grading: Grading; param: number[]; calibration: Calibration;
 };
+type Grading = { shadows: Wheel; midtones: Wheel; highlights: Wheel; global: Wheel; blending: number; balance: number };
+type Calibration = { shadows_tint: number; red_hue: number; red_sat: number; green_hue: number; green_sat: number; blue_hue: number; blue_sat: number };
+const freshWheel = (): Wheel => ({ hue: 0, sat: 0, lum: 0 });
+const freshGrading = (): Grading => ({ shadows: freshWheel(), midtones: freshWheel(), highlights: freshWheel(), global: freshWheel(), blending: 50, balance: 0 });
+const freshCalibration = (): Calibration => ({ shadows_tint: 0, red_hue: 0, red_sat: 0, green_hue: 0, green_sat: 0, blue_hue: 0, blue_sat: 0 });
 type Detail = {
   sharpen: number; sharpen_radius: number; sharpen_masking: number; noise: number; color_noise: number;
   texture: number; clarity: number; dehaze: number; vignette: number; vignette_midpoint: number; vignette_feather: number; grain: number; grain_size: number;
@@ -88,6 +95,7 @@ const ZERO8 = () => [0, 0, 0, 0, 0, 0, 0, 0];
 const freshAdjust = (): Adjust => ({
   exposure: 0, contrast: 0, highlights: 0, shadows: 0, temp: 0, tint: 0, vibrance: 0, saturation: 0, whites: 0, blacks: 0,
   hue: ZERO8(), sat: ZERO8(), lum: ZERO8(),
+  grading: freshGrading(), param: [0, 0, 0, 0], calibration: freshCalibration(),
 });
 const freshRetouch = (): Retouch => ({ enabled: false, blemishes: 1, smooth: 0.45, even: 0.5, shine: 0.35, keep_moles: true, keep_freckles: true });
 const freshSettings = (): Settings => ({ auto: true, look: "natural", strength: 1, adjust: freshAdjust(), retouch: freshRetouch(), crop: freshCrop(), curves: freshCurves(), detail: freshDetail(), masks: [] });
@@ -177,7 +185,13 @@ function Slider({ label, tip, value, auto = 0, onChange, min = -100, max = 100, 
 function normalize(stored: Settings): Settings {
   return {
     ...stored,
-    adjust: { ...freshAdjust(), ...stored.adjust },
+    adjust: {
+      ...freshAdjust(),
+      ...stored.adjust,
+      grading: { ...freshGrading(), ...stored.adjust?.grading },
+      param: stored.adjust?.param ?? [0, 0, 0, 0],
+      calibration: { ...freshCalibration(), ...stored.adjust?.calibration },
+    },
     retouch: stored.retouch ?? freshRetouch(),
     crop: stored.crop ?? freshCrop(),
     curves: stored.curves ?? freshCurves(),
@@ -394,7 +408,19 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
     setToast({ text: `Saved preset "${name}". It's under Look › Your presets.` });
   };
   const applyPreset = (pr: Preset) => update((s) => void Object.assign(s, { ...clone(pr.settings), crop: s.crop, masks: [...(pr.settings.masks ?? []).map(clone), ...s.masks.filter((m) => !isAi(m.kind))] }));
-  const setAdj = (key: keyof Omit<Adjust, "hue" | "sat" | "lum">) => (v: number) => update((s) => void (s.adjust[key] = v));
+  const setAdj = (key: keyof Omit<Adjust, "hue" | "sat" | "lum" | "grading" | "param" | "calibration">) => (v: number) => update((s) => void (s.adjust[key] = v));
+  const setCal = (key: keyof Calibration) => (v: number) => update((s) => void (s.adjust.calibration[key] = v));
+  const setParam = (i: number) => (v: number) => update((s) => void (s.adjust.param[i] = v));
+  const [gradeView, setGradeView] = useState<"3way" | "global">("3way");
+  // white balance eyedropper: click something that should be grey
+  const [picking, setPicking] = useState(false);
+  const pickWb = async (x: number, y: number) => {
+    setPicking(false);
+    if (!current) return;
+    const r = await invoke<[number, number] | null>("wb_pick", { path: current.path, settings: eff(settings), x, y }).catch(() => null);
+    if (r) update((s) => void Object.assign(s.adjust, { temp: r[0], tint: r[1] }));
+    else setToast({ text: "That spot is too dark or too bright to judge. Click something light grey or white that isn't blown out." });
+  };
   const setDet = (key: keyof Detail) => (v: number) => update((s) => void (s.detail[key] = v));
   const setBandAdj = (key: "hue" | "sat" | "lum") => (v: number) => update((s) => void (s.adjust[key][band] = v));
 
@@ -660,7 +686,9 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
       if (e.key.toLowerCase() === "o" && !e.repeat) setMaskOverlay((o) => !o);
       if (e.key === "[" ) setBrush((b) => ({ ...b, size: Math.max(0.004, b.size / 1.2) }));
       if (e.key === "]") setBrush((b) => ({ ...b, size: Math.min(0.3, b.size * 1.2) }));
+      if (e.key.toLowerCase() === "w" && !e.metaKey && !e.ctrlKey) setPicking((p) => !p);
       if (e.key === "Escape") {
+        setPicking(false);
         setCropMode(false);
         setMaskSel(null);
       }
@@ -863,6 +891,7 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
                   tileKey={`${current.path}|${settingsKey}`}
                   zoomCmd={zoomCmd}
                   onZoom={(z, z100) => setZoomInfo({ z, z100 })}
+                  onPick={picking ? pickWb : null}
                   maskTool={selMask && maskSel !== null ? { mask: selMask, brush, onChange: (m) => update((s) => void (s.masks[maskSel] = m)) } : null}
                 />
               ) : (
@@ -1201,7 +1230,13 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
           <Slider label="Texture" tip="d_texture" value={settings.detail.texture} onChange={setDet("texture")} />
           <Slider label="Clarity" tip="d_clarity" value={settings.detail.clarity} onChange={setDet("clarity")} />
           <Slider label="Dehaze" tip="d_dehaze" value={settings.detail.dehaze} onChange={setDet("dehaze")} />
-          <h2 className="sub">Colour</h2>
+          <div className="row">
+            <h2 className="sub">Colour</h2>
+            <button className={`chip wb-pick ${picking ? "on" : ""}`} onClick={() => setPicking((p) => !p)} aria-pressed={picking} title="White balance picker (W): click something in the photo that should be grey or white">
+              <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden><path d="M11 2l3 3-1.5 1.5-1-1L5 12H3v-2l6.5-6.5-1-1z" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" /></svg>
+              {picking ? "Click a grey spot" : "Pick"}
+            </button>
+          </div>
           <Slider label="Temperature" tip="s_temp" value={a.temp} auto={auto.temp} onChange={setAdj("temp")} track="linear-gradient(90deg,#4a7fd6,#9a9a9a,#e0b040)" />
           <Slider label="Tint" tip="s_tint" value={a.tint} auto={auto.tint} onChange={setAdj("tint")} track="linear-gradient(90deg,#4fb35a,#9a9a9a,#c450b8)" />
           <Slider label="Vibrance" tip="s_vibrance" value={a.vibrance} auto={auto.vibrance} onChange={setAdj("vibrance")} />
@@ -1214,6 +1249,38 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
             <h2><Tip k="t_curve">Tone curve</Tip></h2>
           </div>
           <CurveEditor curves={settings.curves} onChange={(c) => update((s) => void (s.curves = c))} histogram={showing?.scopes_after.hist_l} />
+          <h2 className="sub"><Tip k="t_param">Regions</Tip></h2>
+          <Slider label="Highlights" tip="t_param" value={a.param[0]} onChange={setParam(0)} />
+          <Slider label="Lights" tip="t_param" value={a.param[1]} onChange={setParam(1)} />
+          <Slider label="Darks" tip="t_param" value={a.param[2]} onChange={setParam(2)} />
+          <Slider label="Shadows" tip="t_param" value={a.param[3]} onChange={setParam(3)} />
+        </div>
+
+        <div className={g("grading", "grading")} data-g="grading">
+          <div className="row">
+            <h2><Tip k="c_grading">Colour grading</Tip></h2>
+            <div className="seg mini" role="radiogroup" aria-label="Wheels">
+              <button className={gradeView === "3way" ? "on" : ""} aria-pressed={gradeView === "3way"} onClick={() => setGradeView("3way")}>3-way</button>
+              <button className={gradeView === "global" ? "on" : ""} aria-pressed={gradeView === "global"} onClick={() => setGradeView("global")}>Global</button>
+            </div>
+          </div>
+          {gradeView === "3way" ? (
+            <>
+              <div className="gw-row">
+                <GradeWheel label="Midtones" value={a.grading.midtones} onChange={(w) => update((s) => void (s.adjust.grading.midtones = w))} />
+              </div>
+              <div className="gw-row">
+                <GradeWheel label="Shadows" value={a.grading.shadows} onChange={(w) => update((s) => void (s.adjust.grading.shadows = w))} />
+                <GradeWheel label="Highlights" value={a.grading.highlights} onChange={(w) => update((s) => void (s.adjust.grading.highlights = w))} />
+              </div>
+            </>
+          ) : (
+            <div className="gw-row">
+              <GradeWheel label="Global" size={150} value={a.grading.global} onChange={(w) => update((s) => void (s.adjust.grading.global = w))} />
+            </div>
+          )}
+          <Slider label="Blending" tip="c_blending" value={a.grading.blending} min={0} max={100} def={50} onChange={(v) => update((s) => void (s.adjust.grading.blending = v))} />
+          <Slider label="Balance" tip="c_balance" value={a.grading.balance} onChange={(v) => update((s) => void (s.adjust.grading.balance = v))} />
         </div>
 
         <div className={g("", "mix")} data-g="mix">
@@ -1285,6 +1352,20 @@ export default function App({ modeSwitch, active = true }: { modeSwitch?: ReactN
           <h2 className="sub">Grain</h2>
           <Slider label="Amount" tip="d_grain" value={settings.detail.grain} min={0} max={100} def={0} onChange={setDet("grain")} />
           <Slider label="Size" tip="d_gsize" value={settings.detail.grain_size} min={0} max={100} def={25} onChange={setDet("grain_size")} />
+        </div>
+
+        <div className={g("", "calibration")} data-g="calibration">
+          <h2><Tip k="c_calibration">Calibration</Tip></h2>
+          <Slider label="Shadows tint" tip="c_shtint" value={a.calibration.shadows_tint} onChange={setCal("shadows_tint")} track="linear-gradient(90deg,#4fb35a,#9a9a9a,#c450b8)" />
+          <h2 className="sub">Red primary</h2>
+          <Slider label="Hue" tip="c_prim" value={a.calibration.red_hue} onChange={setCal("red_hue")} track="linear-gradient(90deg,#e0407a,#e04040,#e0a040)" />
+          <Slider label="Saturation" tip="c_prim" value={a.calibration.red_sat} onChange={setCal("red_sat")} />
+          <h2 className="sub">Green primary</h2>
+          <Slider label="Hue" tip="c_prim" value={a.calibration.green_hue} onChange={setCal("green_hue")} track="linear-gradient(90deg,#c0d040,#40c050,#40c0a0)" />
+          <Slider label="Saturation" tip="c_prim" value={a.calibration.green_sat} onChange={setCal("green_sat")} />
+          <h2 className="sub">Blue primary</h2>
+          <Slider label="Hue" tip="c_prim" value={a.calibration.blue_hue} onChange={setCal("blue_hue")} track="linear-gradient(90deg,#40b0d0,#4060e0,#9040e0)" />
+          <Slider label="Saturation" tip="c_prim" value={a.calibration.blue_sat} onChange={setCal("blue_sat")} />
         </div>
 
         {/* saving */}

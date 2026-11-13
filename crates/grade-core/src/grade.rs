@@ -31,6 +31,11 @@ pub struct Grade {
     strength: f32,
     /// Your point curves (master, R, G, B) as lookup tables; None = straight.
     user: Option<Box<crate::curves::Tables>>,
+    /// Colour grading wheels.
+    grading: Option<crate::adjust::Grading>,
+    /// Calibration: primaries matrix (linear light) and shadow tint.
+    calib: Option<[[f32; 3]; 3]>,
+    shadow_tint: f32,
 }
 
 impl Grade {
@@ -55,6 +60,7 @@ impl Grade {
         let contrast = (auto.contrast + look.contrast + adj.contrast_amt()).clamp(-0.5, 0.6);
         let highlights = adj.highlights_amt();
         let (whites, blacks) = (adj.whites_amt(), adj.blacks_amt());
+        let param = adj.param.map(|v| v / 100.0 * 0.12);
         // Pulling highlights down also moves the shoulder lower for a gentler roll-off.
         let knee = (auto.highlight_knee + highlights.min(0.0) * 0.4).clamp(0.5, 0.95);
 
@@ -72,6 +78,15 @@ impl Grade {
                     x += contrast * 4.0 * (x - x * x) * (x - 0.5);
                     // 5. whites / blacks: move the ends of the range
                     x += whites * 1.6 * x.powi(4) + blacks * 1.6 * (1.0 - x).powi(4);
+                    // 6. parametric curve regions (Highlights, Lights, Darks, Shadows)
+                    for (k, c) in [0.875f32, 0.625, 0.375, 0.125].iter().enumerate() {
+                        if param[k] != 0.0 {
+                            let d = ((x - c) / 0.25).abs();
+                            if d < 1.0 {
+                                x += param[k] * 0.5 * (1.0 + (std::f32::consts::PI * d).cos()) * (x * (1.0 - x) * 4.0).sqrt();
+                            }
+                        }
+                    }
                     x = x.max(0.0);
                 }
                 // 5. highlight shoulder – smooth roll-off instead of clipping
@@ -109,6 +124,9 @@ impl Grade {
             roll: if look.roll <= 0.0 { 1.0 } else { look.roll },
             strength: strength.clamp(0.0, 2.0),
             user: None,
+            grading: adj.grading.active().then_some(adj.grading),
+            calib: adj.calibration.active().then(|| calibration_matrix(&adj.calibration)),
+            shadow_tint: adj.calibration.shadows_tint / 100.0,
         }
     }
 
@@ -133,11 +151,14 @@ impl Grade {
     #[inline]
     pub fn apply_px(&self, inp: Rgb) -> Rgb {
         // White balance + exposure happen in linear light, like a camera would.
-        let lin = [
+        let mut lin = [
             to_linear(inp[0]) * self.gain[0],
             to_linear(inp[1]) * self.gain[1],
             to_linear(inp[2]) * self.gain[2],
         ];
+        if let Some(m) = &self.calib {
+            lin = [0, 1, 2].map(|r| (m[r][0] * lin[0] + m[r][1] * lin[1] + m[r][2] * lin[2]).max(0.0));
+        }
         let d = lin.map(to_display);
 
         // Tone curve: half per-channel (natural, adds a little punch) and half
@@ -209,6 +230,41 @@ impl Grade {
             for i in 0..3 {
                 c[i] += self.sh_tint[i] * ws + self.hl_tint[i] * wh;
             }
+
+            // Colour grading wheels: tint (and brighten / darken) shadows, midtones,
+            // highlights and everything, with soft overlaps.
+            if let Some(g) = &self.grading {
+                let y = luma(c).clamp(0.0, 1.0);
+                let p = 0.5 - 0.3 * g.balance / 100.0;
+                let wdt = 0.08 + 0.32 * g.blending / 100.0;
+                let ss = |a: f32, b: f32, x: f32| {
+                    let t = ((x - a) / (b - a).max(1e-4)).clamp(0.0, 1.0);
+                    t * t * (3.0 - 2.0 * t)
+                };
+                let w_s = 1.0 - ss(p - 2.0 * wdt, p, y);
+                let w_h = ss(p, p + 2.0 * wdt, y);
+                let w_m = (1.0 - w_s - w_h).max(0.0);
+                let protect = 1.0 - 0.3 * skin;
+                for (w, wh) in [(w_s, g.shadows), (w_m, g.midtones), (w_h, g.highlights), (1.0, g.global)] {
+                    if w <= 0.0 || (wh.sat == 0.0 && wh.lum == 0.0) {
+                        continue;
+                    }
+                    let tv = tint_vector(wh.hue);
+                    let amt = wh.sat / 100.0 * 0.22 * w * protect;
+                    let lum = wh.lum / 100.0 * 0.25 * w;
+                    for i in 0..3 {
+                        c[i] += tv[i] * amt + lum * (1.0 - (c[i] - 0.5).abs());
+                    }
+                }
+            }
+            // Calibration: shadows tint (− green, + magenta)
+            if self.shadow_tint != 0.0 {
+                let y = luma(c).clamp(0.0, 1.0);
+                let w = (1.0 - y).powi(2) * self.shadow_tint * 0.08;
+                c[0] += w * 0.5;
+                c[1] -= w;
+                c[2] += w * 0.5;
+            }
         }
 
         if let Some(t) = &self.user {
@@ -248,6 +304,48 @@ impl Grade {
 }
 
 const LUT_N: usize = 41;
+
+/// Calibration as a 3×3 matrix in linear light: each primary turned around the grey axis
+/// (hue, ±30°) and pushed away from / towards grey (saturation); white stays white.
+fn calibration_matrix(c: &crate::adjust::Calibration) -> [[f32; 3]; 3] {
+    let prim = [(c.red_hue, c.red_sat), (c.green_hue, c.green_sat), (c.blue_hue, c.blue_sat)];
+    let mut cols = [[0f32; 3]; 3];
+    let k = 1.0 / 3f32.sqrt();
+    for (i, (h, s)) in prim.iter().enumerate() {
+        let mut v = [0f32; 3];
+        v[i] = 1.0;
+        // rotate about (1,1,1)/sqrt3 (Rodrigues)
+        let th = (h / 100.0 * 30.0).to_radians();
+        let (sn, cs) = th.sin_cos();
+        let ax = [k, k, k];
+        let dot = v[0] * ax[0] + v[1] * ax[1] + v[2] * ax[2];
+        let cross = [ax[1] * v[2] - ax[2] * v[1], ax[2] * v[0] - ax[0] * v[2], ax[0] * v[1] - ax[1] * v[0]];
+        let mut r = [0f32; 3];
+        for j in 0..3 {
+            r[j] = v[j] * cs + cross[j] * sn + ax[j] * dot * (1.0 - cs);
+        }
+        // saturation: distance from grey
+        let g = (r[0] + r[1] + r[2]) / 3.0;
+        let f = 1.0 + s / 100.0 * 0.6;
+        for j in 0..3 {
+            cols[i][j] = g + (r[j] - g) * f;
+        }
+    }
+    // matrix with those columns, rows normalised so white maps to white
+    let mut m = [[0f32; 3]; 3];
+    for r in 0..3 {
+        for col in 0..3 {
+            m[r][col] = cols[col][r];
+        }
+        let sum: f32 = m[r].iter().sum();
+        if sum.abs() > 1e-4 {
+            for col in 0..3 {
+                m[r][col] /= sum;
+            }
+        }
+    }
+    m
+}
 
 /// Trilinear lookup in a baked grade.
 #[inline]

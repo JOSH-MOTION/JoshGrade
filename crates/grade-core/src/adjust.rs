@@ -20,6 +20,65 @@ pub struct Adjust {
     pub hue: [f32; 8],
     pub sat: [f32; 8],
     pub lum: [f32; 8],
+    /// Colour grading wheels (like Lightroom's Color Grading / Capture One's Color Balance).
+    pub grading: Grading,
+    /// Parametric tone curve: Highlights, Lights, Darks, Shadows (−100..100).
+    pub param: [f32; 4],
+    /// Calibration: shift the camera's red / green / blue primaries, and shadow tint.
+    pub calibration: Calibration,
+}
+
+/// One colour wheel: hue (0..360°), saturation (0..100) and luminance (−100..100).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default)]
+pub struct Wheel {
+    pub hue: f32,
+    pub sat: f32,
+    pub lum: f32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Grading {
+    pub shadows: Wheel,
+    pub midtones: Wheel,
+    pub highlights: Wheel,
+    pub global: Wheel,
+    /// How much the three ranges overlap (0..100, default 50).
+    pub blending: f32,
+    /// Moves the split between shadows and highlights (−100..100).
+    pub balance: f32,
+}
+
+impl Default for Grading {
+    fn default() -> Self {
+        Grading { shadows: Wheel::default(), midtones: Wheel::default(), highlights: Wheel::default(), global: Wheel::default(), blending: 50.0, balance: 0.0 }
+    }
+}
+
+impl Grading {
+    pub fn active(&self) -> bool {
+        [self.shadows, self.midtones, self.highlights, self.global].iter().any(|w| w.sat.abs() > 0.01 || w.lum.abs() > 0.01)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default)]
+pub struct Calibration {
+    /// Shadows tint: − green, + magenta.
+    pub shadows_tint: f32,
+    pub red_hue: f32,
+    pub red_sat: f32,
+    pub green_hue: f32,
+    pub green_sat: f32,
+    pub blue_hue: f32,
+    pub blue_sat: f32,
+}
+
+impl Calibration {
+    pub fn active(&self) -> bool {
+        *self != Calibration::default()
+    }
 }
 
 /// Everything that decides how one photo is graded.
@@ -92,5 +151,6 @@ pub fn auto_sliders(p: &crate::AutoParams) -> Adjust {
         hue: [0.0; 8],
         sat: p.hsl_sat.map(|v| r((v - 1.0) * 100.0)),
         lum: p.hsl_lum.map(|v| r(v * 400.0)),
+        ..Default::default()
     }
 }

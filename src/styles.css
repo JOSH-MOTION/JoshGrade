@@ -411,3 +411,18 @@ button.quiet { background: none; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
 .not-mac .titlebar { padding-left: 16px; }
+
+/* ---- colour grading wheels */
+.gw-row { display: flex; justify-content: space-around; gap: 8px; margin: 6px 0; }
+.gw { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.gw-head { display: flex; justify-content: space-between; width: 100%; font-size: 11.5px; color: var(--muted); gap: 6px; }
+.gw-pad { position: relative; border-radius: 50%; cursor: crosshair; touch-action: none;
+  background: radial-gradient(circle, rgba(40,40,44,1) 0%, rgba(40,40,44,0.85) 18%, rgba(40,40,44,0) 72%),
+              conic-gradient(from 90deg, #f33, #f3f, #33f, #3ff, #3f3, #ff3, #f33);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.15); }
+.gw-pad:focus-visible { outline: 2px solid var(--accent, #6af); outline-offset: 2px; }
+.gw-dot { position: absolute; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.6); pointer-events: none; }
+.gw-lum { width: 100%; max-width: 140px; }
+.wb-pick { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; }
+.wb-pick.on { background: var(--accent, #6af); color: #111; }
+.viewer.picking, .viewer.picking * { cursor: crosshair !important; }

@@ -489,6 +489,26 @@ async fn save_batch(app: tauri::AppHandle, state: St<'_>, req: BatchRequest) -> 
     .await
 }
 
+/// White balance eyedropper: click something that should be grey. `x`, `y` are fractions of
+/// the photo as shown (after quarter turns / flip).
+#[tauri::command]
+async fn wb_pick(state: St<'_>, path: String, settings: Settings, x: f32, y: f32) -> Result<Option<(f32, f32)>, String> {
+    let st = Arc::clone(&state);
+    blocking(move || {
+        let e = cached(&st, &path)?;
+        let cr = settings.crop;
+        let x = if cr.flip_h { 1.0 - x } else { x };
+        let (ux, uy) = match cr.rot90.rem_euclid(4) {
+            0 => (x, y),
+            1 => (y, 1.0 - x),
+            2 => (1.0 - x, 1.0 - y),
+            _ => (1.0 - y, x),
+        };
+        Ok(grade_core::white_balance_at(&e.analysis, &settings, &e.photo, ux, uy))
+    })
+    .await
+}
+
 /// A red see-through picture of where one mask is, the same size as the preview.
 #[tauri::command]
 async fn mask_overlay(state: St<'_>, path: String, settings: Settings, index: usize) -> Result<String, String> {
@@ -617,6 +637,7 @@ fn main() {
             mask_download,
             mask_overlay,
             prefetch,
+            wb_pick,
             jobs::jobs_list,
             jobs::job_cancel,
             jobs::jobs_clear,

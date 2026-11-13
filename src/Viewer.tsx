@@ -63,6 +63,8 @@ export function Viewer(props: {
   tileKey: string; zoomCmd: { n: number; to: "fit" | "100" | "in" | "out" } | null; onZoom: (z: number, z100: number) => void;
   /** Editing a mask: draw its handles / brush on the photo. */
   maskTool?: { mask: Mask; brush: Brush; onChange: (m: Mask) => void } | null;
+  /** Picking a point (white balance eyedropper, spot tools): x, y as fractions of the shown photo. */
+  onPick?: ((x: number, y: number) => void) | null;
 }) {
   const { W, H, crop, cropMode } = props;
   const box = useRef<HTMLDivElement>(null);
@@ -206,6 +208,11 @@ export function Viewer(props: {
 
   // ---- pointer handling: crop editing, panning, or the compare divider
   const onDown = (e: React.PointerEvent) => {
+    if (props.onPick && !cropMode) {
+      const [u, v] = toImage(e.clientX, e.clientY);
+      if (u >= 0 && u <= 1 && v >= 0 && v <= 1) props.onPick(u, v);
+      return;
+    }
     const t = e.target as HTMLElement;
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     const mode = t.dataset.h ?? (cropMode ? (t.closest(".crop-rect") ? "move" : "") : zoom > 1.001 && !t.closest(".divider") ? "pan" : tool ? "" : "split");
@@ -264,7 +271,7 @@ export function Viewer(props: {
 
   return (
     <div
-      className={`viewer ${cropMode ? "cropping" : ""} ${zoom > 1.001 ? "zoomed" : ""} ${tool ? `masking m-${tool.mask.kind}` : ""}`}
+      className={`viewer ${cropMode ? "cropping" : ""} ${zoom > 1.001 ? "zoomed" : ""} ${tool ? `masking m-${tool.mask.kind}` : ""} ${props.onPick ? "picking" : ""}`}
       ref={box}
       onPointerDown={onDown}
       onPointerMove={onMove}
